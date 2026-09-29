@@ -221,3 +221,34 @@ def test_finish_update_removed_app_with_nowhere_to_install_clears(rebuilt, tmp_p
     out = capsys.readouterr().out
     assert "no longer installed" in out
     assert not _record_path().exists()
+
+
+def test_products_stage_warns_when_an_install_stays_pending(rebuilt, tmp_path, monkeypatch, capsys):
+    """Requirement 4 (#123737): the products stage the bootstrap/repair/installer
+    flows share must not end on plain success while the rebuilt app sits staged
+    and uninstalled — the skip is surfaced with the completion command."""
+    import hermes_cli.source_build as source_build
+    import hermes_cli.update_receipt as update_receipt
+
+    running = _bundle(tmp_path / "Applications", b"older")
+    monkeypatch.setattr(main_desktop, "_stage_macos_bundle_copy", _stage_copy)
+    main_desktop.record_pending_desktop_install(
+        app=running, rebuilt_app=rebuilt, asar_hash=main_desktop._app_asar_hash(rebuilt))
+
+    recorded = {}
+    monkeypatch.setattr(update_receipt, "record_fact",
+                        lambda key, value: recorded.update({key: value}))
+
+    source_build._warn_pending_desktop_install()
+
+    err = capsys.readouterr().err
+    assert str(running) in err and "finish-update" in err
+    assert recorded == {"pending_desktop_install": str(running)}
+
+
+def test_products_stage_says_nothing_without_a_pending_install(capsys):
+    import hermes_cli.source_build as source_build
+
+    source_build._warn_pending_desktop_install()
+
+    assert capsys.readouterr().err == ""
