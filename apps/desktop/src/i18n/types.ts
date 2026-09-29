@@ -3608,6 +3608,8 @@ export interface Translations {
     bundleOutOfSync: string
     bundleOutOfSyncDesc: string
     bundleOutOfSyncAction: string
+    bundleOutOfSyncPendingDesc: string
+    bundleOutOfSyncPendingAction: string
     checkingShort: string
     releaseAvailable: (tag: string) => string
     versionDetailsTitle: string
