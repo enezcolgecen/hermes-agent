@@ -579,6 +579,130 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
     return error
 
 
+def _pre_agent_direct_candidate(session, params, text, display_kind):
+    """Only ordinary visible text turns may bypass agent/model construction."""
+    if (
+        display_kind
+        or params.get("voice_context")
+        or params.get("queued")
+        or params.get("_hosted_task")
+        or params.get("_hosted_terminal_callback")
+        or session.get("attached_images")
+        or not isinstance(text, str)
+        or not text.strip()
+    ):
+        return False
+
+    stripped = text.lstrip()
+    return not stripped.startswith("/") and "@" not in text
+
+
+def _pre_agent_direct_answer(session, text):
+    """Offer a persisted ordinary turn to pre_turn_response before constructing an AIAgent."""
+    from hermes_cli.lifecycle import has_hook, invoke_hook
+
+    if not has_hook("pre_turn_response"):
+        return None
+
+    with session["history_lock"]:
+        history = list(session.get("history") or [])
+
+    recent_user_history = tuple(
+        message
+        for message in history
+        if isinstance(message, dict) and message.get("role") == "user"
+    )[-4:]
+
+    replies = invoke_hook(
+        "pre_turn_response",
+        user_message=text,
+        conversation_history=recent_user_history,
+        cwd=_session_cwd(session),
+        session_key=session.get("session_key"),
+        platform="tui",
+    )
+
+    return next(
+        (
+            reply["final_response"]
+            for reply in replies
+            if isinstance(reply, dict)
+            and isinstance(reply.get("final_response"), str)
+            and reply["final_response"].strip()
+        ),
+        None,
+    )
+
+
+def _commit_pre_agent_direct_response(sid, session, text, answer):
+    """Persist and emit a direct response after the native submit-time user row already exists."""
+    from agent.context_compressor import _DB_PERSISTED_MARKER
+    from agent.message_metadata import stamp_message_timestamp
+
+    staged = session.get("_submit_user_row")
+    if (
+        not isinstance(staged, dict)
+        or staged.get("content") != text
+        or type(staged.get("_row_id")) is not int
+        or staged["_row_id"] <= 0
+    ):
+        raise RuntimeError("direct turn response user-row staging unavailable")
+
+    key = str(session.get("session_key") or "")
+    if not key:
+        raise RuntimeError("direct turn response session key unavailable")
+
+    assistant = stamp_message_timestamp(
+        {"role": "assistant", "content": answer}
+    )
+
+    with _session_db(session) as db:
+        if db is None:
+            raise RuntimeError("direct turn response persistence unavailable")
+        assistant["_row_id"] = db.append_message(
+            key,
+            "assistant",
+            content=answer,
+            timestamp=assistant["timestamp"],
+        )
+
+    assistant[_DB_PERSISTED_MARKER] = True
+    staged = session.pop("_submit_user_row")
+
+    with session["history_lock"]:
+        history = list(session.get("history") or [])
+        if not history or history[-1].get("_row_id") != staged.get("_row_id"):
+            history.append(staged)
+        history.append(assistant)
+        session["history"] = history
+        session["history_version"] = int(session.get("history_version", 0)) + 1
+        session["running"] = False
+        session["last_active"] = time.time()
+        session.pop("_hosted_room_task", None)
+        _clear_inflight_turn(session)
+        _release_active_session_slot(session)
+
+    user_row_id = staged["_row_id"]
+    assistant_row_id = assistant["_row_id"]
+
+    _emit("message.start", sid)
+    _emit(
+        "message.complete",
+        sid,
+        {
+            "text": answer,
+            "status": "complete",
+            "persisted_turn": {
+                "row_ids": [user_row_id, assistant_row_id],
+                "complete": True,
+                "user_row_id": user_row_id,
+                "final_assistant_row_id": assistant_row_id,
+            },
+        },
+    )
+    _emit("session.info", sid, _session_info(session.get("agent"), session))
+
+
 def _run_after_agent_ready(
     rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author=None
 ):
@@ -781,6 +905,47 @@ def _(rid, params: dict) -> dict:
     staged_user = session.get("_submit_user_row") or {}
     if isinstance(staged_user.get("_row_id"), int):
         survivor_fields["user_row_id"] = staged_user["_row_id"]
+
+    if _pre_agent_direct_candidate(session, params, text, display_kind):
+        try:
+            direct_answer = _pre_agent_direct_answer(session, text)
+        except Exception as exc:
+            logger.exception("pre-agent direct response hook failed")
+            with session["history_lock"]:
+                session["running"] = False
+                session["last_active"] = time.time()
+                session.pop("_hosted_room_task", None)
+                _clear_inflight_turn(session)
+                _release_active_session_slot(session)
+            return _err(
+                rid,
+                5073,
+                f"Direct response hook failed before model dispatch: {type(exc).__name__}",
+            )
+
+        if direct_answer is not None:
+            try:
+                _commit_pre_agent_direct_response(
+                    sid, session, text, direct_answer
+                )
+            except Exception as exc:
+                logger.exception("pre-agent direct response commit failed")
+                with session["history_lock"]:
+                    session["running"] = False
+                    session["last_active"] = time.time()
+                    session.pop("_hosted_room_task", None)
+                    _clear_inflight_turn(session)
+                    _release_active_session_slot(session)
+                return _err(
+                    rid,
+                    5074,
+                    f"Direct response persistence failed; model fallback blocked: {type(exc).__name__}",
+                )
+            return _ok(
+                rid,
+                {"status": "streaming", **survivor_fields},
+            )
+
     # A completed FAILED build must not wedge the session: rebuild, don't replay it.
     if not _restart_completed_failed_agent_build(sid, session, session.get("agent_ready")):
         _start_agent_build(sid, session)
