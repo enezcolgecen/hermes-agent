@@ -16,6 +16,7 @@ import logging
 import os
 import secrets
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -73,6 +74,10 @@ def _stable_port() -> int:
         return _free_port()
 
 
+def api_key_path() -> Path:
+    return runtimes_root() / ".api_key"
+
+
 def _stable_api_key() -> str:
     """One key for the life of the install, persisted beside the runtimes.
 
@@ -80,19 +85,36 @@ def _stable_api_key() -> str:
     per-boot key strands every resumed session on HTTP 401 exactly as a per-boot port would on
     connection errors.
     """
-    key_path = runtimes_root() / ".api_key"
-    with suppress(OSError):
-        existing = key_path.read_text(encoding="utf-8-sig").strip()
-        if len(existing) >= 16:
-            return existing
-    key = secrets.token_urlsafe(24)
+    key_path = api_key_path()
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    # Never follow a credential symlink or fall back to a key carried in argv.
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
     try:
-        key_path.parent.mkdir(parents=True, exist_ok=True)
-        key_path.write_text(key, encoding="utf-8")
-    except OSError as exc:
-        logger.warning("could not persist api key (%s); sessions will need "
-                       "a re-pick after restart", exc)
-    return key
+        fd = os.open(key_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        fd = os.open(key_path, flags)
+    else:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            key = secrets.token_urlsafe(24)
+            stream.write(key)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return key
+    with os.fdopen(fd, "r", encoding="utf-8") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or (hasattr(os, "getuid") and info.st_uid != os.getuid()):
+            raise RuntimeError("managed API key must be an owned regular file")
+        if os.name != "nt":
+            os.fchmod(stream.fileno(), 0o600)
+        key = stream.read().strip()
+        if len(key) < 16 or any(c.isspace() for c in key) or key.startswith("#") or "," in key:
+            raise RuntimeError("managed API key file is invalid; refusing startup")
+        return key
+
+
+def _redacted_command(cmd: list[str], key: str) -> list[str]:
+    """Diagnostics never contain a literal local credential, including embedded values."""
+    return [part.replace(key, "[REDACTED]") for part in cmd]
 
 
 @lru_cache(maxsize=16)
@@ -179,11 +201,16 @@ class LlamaServerSupervisor:
 
     def _spawn(self) -> None:
         exe = self.binary
+        if any(arg.split("=", 1)[0] in ("--api-key", "-api-key", "--api-key-file")
+               for arg in self.extra_args):
+            raise RuntimeError("managed authentication cannot be overridden by extra_args")
+        if _stable_api_key() != self.api_key:
+            raise RuntimeError("managed API key changed; refusing stale supervisor startup")
         cmd = [
             str(exe),
             "--host", "127.0.0.1",
             "--port", str(self.port),
-            "--api-key", self.api_key,
+            "--api-key-file", str(api_key_path()),
             "--models-max", str(self.models_max),
             # Residency contract: a chat request to a staged-but-unloaded model loads it (slow
             # first token) instead of a bare 400/404 after an eject.
@@ -201,12 +228,14 @@ class LlamaServerSupervisor:
         else:
             cmd += ["--models-dir", str(self.models_dir)]
         cmd += self.extra_args
+        if any(self.api_key in arg for arg in cmd):
+            raise RuntimeError("managed API key cannot appear in process arguments")
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         if self._log_handle is not None:
             # The crash-restart loop calls _spawn repeatedly; each restart would leak one fd.
             _quiet(self._log_handle.close)
         self._log_handle = open(self.log_path, "a", encoding="utf-8", errors="replace")
-        self._log_handle.write(f"\n# spawn: {cmd}\n")
+        self._log_handle.write(f"\n# spawn: {_redacted_command(cmd, self.api_key)}\n")
         self._log_handle.flush()
         # list-args, never a shell: spaced paths (user homes) must survive.
         self.proc, self._job = spawn_server(cmd, stdout=self._log_handle, stderr=subprocess.STDOUT,
