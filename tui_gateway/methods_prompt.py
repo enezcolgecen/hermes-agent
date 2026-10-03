@@ -703,6 +703,41 @@ def _commit_pre_agent_direct_response(sid, session, text, answer):
     _emit("session.info", sid, _session_info(session.get("agent"), session))
 
 
+def _run_local_fast_answer(rid, sid, session, text, plan):
+    from .local_fast_answer import FastAnswerError, answer, remember
+
+    try:
+        with _session_profile_runtime_scope(session):
+            content, _metrics = answer(
+                plan, cancelled=lambda: bool(session.get("_turn_cancel_requested")))
+            _commit_pre_agent_direct_response(sid, session, text, content)
+            remember(session, plan, content)
+    except Exception as exc:
+        # No provider body, prompt, credential, or automatic agent retry on this path.
+        reason = str(exc) if isinstance(exc, FastAnswerError) else "persistence_or_scope"
+        logger.warning("local_fast_answer outcome=terminal_error reason=%s", reason)
+        _emit_terminal_turn_error(
+            sid, session, "Local answer failed; no automatic retry was made.",
+            error_surface={"layer": "runtime", "code": "local_fast_answer_failed", "retryable": True})
+        with session["history_lock"]:
+            session["running"] = False
+            session["last_active"] = time.time()
+            session.pop("_hosted_room_task", None)
+            _clear_inflight_turn(session)
+            _release_active_session_slot(session)
+    # A user can queue a tool/action turn while this one-shot answer is in flight.
+    # Preserve the native queue, build and dispatch contract for that separate turn.
+    with session["history_lock"]:
+        drain = (bool(session.get("queued_prompt")) and not session.get("running")
+                 and not session.get("_turn_cancel_requested"))
+    if drain:
+        with _session_profile_runtime_scope(session):
+            if not _restart_completed_failed_agent_build(sid, session, session.get("agent_ready")):
+                _start_agent_build(sid, session)
+            if _wait_agent_for_prompt(session, rid, sid) is None:
+                _drain_queued_prompt(rid, sid, session)
+
+
 def _run_after_agent_ready(
     rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author=None
 ):
@@ -924,6 +959,7 @@ def _(rid, params: dict) -> dict:
             )
 
         if direct_answer is not None:
+            logger.info("local_fast_answer outcome=memory_hit inference=0")
             try:
                 _commit_pre_agent_direct_response(
                     sid, session, text, direct_answer
@@ -945,6 +981,24 @@ def _(rid, params: dict) -> dict:
                 rid,
                 {"status": "streaming", **survivor_fields},
             )
+
+    if _pre_agent_direct_candidate(session, params, text, display_kind):
+        from .local_fast_answer import prepare
+
+        try:
+            fast_plan = prepare(session, params, text)
+        except Exception:
+            logger.info("local_fast_answer outcome=fallthrough reason=admission_unavailable")
+            fast_plan = None
+        if fast_plan is not None:
+            run_thread = threading.Thread(
+                target=lambda: _run_local_fast_answer(rid, sid, session, text, fast_plan), daemon=True)
+            session["_run_thread"] = run_thread
+            run_thread.start()
+            return _ok(rid, {"status": "streaming", **survivor_fields})
+
+    else:
+        logger.info("local_fast_answer outcome=fallthrough reason=nonordinary_turn")
 
     # A completed FAILED build must not wedge the session: rebuild, don't replay it.
     if not _restart_completed_failed_agent_build(sid, session, session.get("agent_ready")):
