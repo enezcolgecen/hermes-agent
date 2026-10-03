@@ -966,6 +966,14 @@ _CODEX_ACK_CONTINUATION_NUDGE = (
 
 # Re-prompt after a collapsed fragment ended a turn that had done real tool work (#103483). Asks
 # for the same answer again when it WAS complete, so a false positive costs one call, never the answer.
+_REASONING_AFTER_TOOL_NUDGE = (
+    "[System: You executed tool calls but your last response contained only internal reasoning "
+    "and no visible final answer. If the task is unfinished, continue using the required tools "
+    "and then give the complete answer. If the task is complete, send the complete answer now "
+    "as plain text.]"
+)
+
+
 _DEGENERATE_FINAL_NUDGE = (
     "[System: Your previous message ended the turn with a fragment that is not a usable answer. "
     "If the task is unfinished, continue it and then give the complete answer. If that fragment "

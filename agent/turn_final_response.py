@@ -67,7 +67,7 @@ def finish_text_response(
     stop gates accept it."""
     from agent.conversation_loop import (
         _CODEX_ACK_CONTINUATION_NUDGE, _DEGENERATE_FINAL_NUDGE, _DROPPED_TOOLCALL_NUDGE_CONTENT,
-        _join_truncated_parts
+        _REASONING_AFTER_TOOL_NUDGE, _join_truncated_parts
     )
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> FinalResponseVerdict:
@@ -155,8 +155,9 @@ def finish_text_response(
     # delivery channel (gateway status message / CLI print). NEVER appended to messages/api_messages:
     # conversation context and the cached prompt prefix stay byte-identical.
     from agent.agent_runtime_helpers import (
-        intent_ack_continuation_mode, looks_like_degenerate_final, promoted_reasoning_announces_action,
-        tool_results_this_turn, trailing_continue_intent,
+        intent_ack_continuation_mode, looks_like_degenerate_final,
+        promoted_reasoning_after_tool_needs_visibility_retry,
+        promoted_reasoning_announces_action, tool_results_this_turn, trailing_continue_intent,
     )
 
     _ack_mode = intent_ack_continuation_mode(agent)
@@ -167,6 +168,19 @@ def finish_text_response(
     # stalled model, and returning it as the answer aborts the tool loop while reporting
     # "complete" (#111761). Same cap, so a model that never acts still ends after 2 nudges.
     _stall_text = agent._strip_think_blocks(final_response or "")
+    _tool_rows = tool_results_this_turn(messages)
+
+    # A clean stop that contains only promoted reasoning after actual tool
+    # results is not yet a visible task completion. This decision is structural,
+    # not language-dependent. The continuation user row closes this tool window.
+    _promoted_after_tool = (
+        bool(getattr(agent, "_stall_guards", True))
+        and agent.valid_tool_names
+        and promoted_reasoning_after_tool_needs_visibility_retry(
+            _promoted, _tool_rows, codex_ack_continuations
+        )
+    )
+
     _stall_continue_intent = (
         bool(getattr(agent, "_stall_guards", True))
         and agent.valid_tool_names
@@ -179,7 +193,6 @@ def finish_text_response(
     # Degenerate-final guard (#103483): the turn did real tool work and then stopped on a
     # fragment. Same scope knob and the SAME bounded counter as the ack continuation; the nudge
     # row itself closes the tool-work window, so a second fragment ends the turn as the answer.
-    _tool_rows = tool_results_this_turn(messages)
     _degenerate_final = (
         bool(getattr(agent, "_stall_guards", True))
         and _ack_mode != "off"
@@ -188,7 +201,9 @@ def finish_text_response(
         and looks_like_degenerate_final(_stall_text, user_message=user_message)
     )
     # Precedence: an announced next action outranks the fragment shape; the codex ack is last.
-    if _stall_continue_intent:
+    if _promoted_after_tool:
+        _continuation_kind = "reasoning_after_tool"
+    elif _stall_continue_intent:
         _continuation_kind = "stall"
     elif _degenerate_final:
         _continuation_kind = "degenerate"
@@ -205,7 +220,13 @@ def finish_text_response(
     else:
         _continuation_kind = None
     if _continuation_kind:
-        if _continuation_kind == "stall":
+        if _continuation_kind == "reasoning_after_tool":
+            logger.info(
+                "Reasoning-only final after %d tool result(s) — "
+                "re-prompting for visible task completion (%d/2)",
+                _tool_rows, codex_ack_continuations + 1,
+            )
+        elif _continuation_kind == "stall":
             logger.info(
                 "Stall guard: turn ending on trailing continue-"
                 "intent with no tool calls — re-prompting to act "
@@ -228,8 +249,13 @@ def finish_text_response(
         append_message(messages, {
             "role": "user",
             "content": (
-                _DEGENERATE_FINAL_NUDGE if _continuation_kind == "degenerate"
-                else _CODEX_ACK_CONTINUATION_NUDGE
+                _REASONING_AFTER_TOOL_NUDGE
+                if _continuation_kind == "reasoning_after_tool"
+                else (
+                    _DEGENERATE_FINAL_NUDGE
+                    if _continuation_kind == "degenerate"
+                    else _CODEX_ACK_CONTINUATION_NUDGE
+                )
             ),
         })
         agent._session_messages = messages

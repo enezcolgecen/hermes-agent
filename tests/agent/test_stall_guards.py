@@ -516,6 +516,48 @@ def test_promoted_reasoning_detector_catches_turkish_necessity_tail():
     )
 
 
+def test_promoted_reasoning_after_tool_visibility_retry_is_structural():
+    from agent.agent_runtime_helpers import (
+        promoted_reasoning_after_tool_needs_visibility_retry,
+        tool_results_this_turn,
+    )
+
+    # Exact latest physical failure, but wording is irrelevant to the gate.
+    assert promoted_reasoning_after_tool_needs_visibility_retry(
+        "GitHub CLI'yi kontrol edeyim.", 1, 0
+    )
+
+    # Even a genuine answer is surfaced once as visible content after tool work.
+    assert promoted_reasoning_after_tool_needs_visibility_retry(
+        "The answer is 42.", 1, 0
+    )
+
+    # Existing parser-compat behavior remains unchanged when no tool ran.
+    assert not promoted_reasoning_after_tool_needs_visibility_retry(
+        "The answer is 42.", 0, 0
+    )
+
+    # Shared continuation cap still bounds the mechanism.
+    assert not promoted_reasoning_after_tool_needs_visibility_retry(
+        "Continue.", 1, 2
+    )
+
+    messages = [
+        {"role": "user", "content": "Check the repository."},
+        {"role": "assistant", "tool_calls": [{"id": "call-1"}]},
+        {"role": "tool", "content": "tool result", "tool_call_id": "call-1"},
+    ]
+    assert tool_results_this_turn(messages) == 1
+
+    # The continuation nudge is a user row, so the previous tool result is no
+    # longer in the current structural window.
+    messages.append({
+        "role": "user",
+        "content": "[System: Continue and give the visible answer.]",
+    })
+    assert tool_results_this_turn(messages) == 0
+
+
 def test_promoted_reasoning_detector_catches_turkish_optative_physical_tail():
     from agent.agent_runtime_helpers import promoted_reasoning_announces_action
 

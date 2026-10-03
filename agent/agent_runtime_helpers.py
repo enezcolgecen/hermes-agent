@@ -3326,6 +3326,23 @@ def promoted_reasoning_announces_action(text: str) -> bool:
     )
 
 
+def promoted_reasoning_after_tool_needs_visibility_retry(
+    promoted_text, tool_rows: int, continuation_count: int
+) -> bool:
+    """Retry a reasoning-only stop after real tool work without inspecting language.
+
+    ``promoted_text`` only exists when visible assistant content was empty and a
+    clean-stop reasoning block was promoted. A positive ``tool_rows`` proves the
+    current user window actually performed tool work. The shared continuation
+    cap prevents an unbounded loop.
+    """
+    return bool(
+        (promoted_text or "").strip()
+        and int(tool_rows or 0) > 0
+        and int(continuation_count or 0) < 2
+    )
+
+
 _INTENT_ACK_ON = {"true", "always", "yes", "on"}
 _INTENT_ACK_OFF = {"false", "never", "no", "off"}
 
