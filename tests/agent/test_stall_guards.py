@@ -516,6 +516,31 @@ def test_promoted_reasoning_detector_catches_turkish_necessity_tail():
     )
 
 
+def test_promoted_reasoning_detector_catches_turkish_optative_physical_tail():
+    from agent.agent_runtime_helpers import promoted_reasoning_announces_action
+
+    physical = (
+        "Kullanıcının hafızasında cutmentis-control-plane klasör yolları var. "
+        "Şimdi bu klasörün GitHub'daki repo'yu bulmak için farklı bir yaklaşım deneyeyim."
+    )
+    assert promoted_reasoning_announces_action(physical)
+
+    assert promoted_reasoning_announces_action(
+        "Şimdi repo durumunu kontrol edeyim."
+    )
+    assert promoted_reasoning_announces_action(
+        "Önce doğru remote'u arayayım."
+    )
+
+    # Non-action factual statements must remain answers, not stalls.
+    assert not promoted_reasoning_announces_action(
+        "Bu konuda kararsız adayım."
+    )
+    assert not promoted_reasoning_announces_action(
+        "Sonuç olarak bu yaklaşım uygundur."
+    )
+
+
 def test_promoted_reasoning_detector_ignores_thai_stated_answers():
     from agent.agent_runtime_helpers import promoted_reasoning_announces_action
 

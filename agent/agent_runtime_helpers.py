@@ -3293,6 +3293,21 @@ _PROMOTED_REASONING_TR_NECESSITY_TAIL_RE = re.compile(
 )
 
 
+# Turkish first-person action-intent tails observed in physical Desktop
+# tool turns: "deneyeyim", "bakayım", "kontrol edeyim", "arayayım".
+# Requiring a transition/action sentence near the tail keeps the detector
+# narrower than treating every -ayım/-eyim word as a stall.
+_PROMOTED_REASONING_TR_OPTATIVE_TAIL_RE = re.compile(
+    r"(?:^|[.!?:\u2026\n]\s*)"
+    r"[^.!?\n]{0,180}"
+    r"\b(?:şimdi|önce|ardından|sonra)\b"
+    r"[^.!?\n]{0,140}"
+    r"\b[a-zçğıöşü]+(?:ayım|eyim|yayım|yeyim)\b"
+    r"[^.!?\n]{0,40}(?:[.:\u2026]+)?\s*$",
+    re.IGNORECASE,
+)
+
+
 def promoted_reasoning_announces_action(text: str) -> bool:
     """Whether promoted reasoning ENDS on a first-person plan to act (stall, not an answer).
 
@@ -3307,6 +3322,7 @@ def promoted_reasoning_announces_action(text: str) -> bool:
         _PROMOTED_REASONING_PLAN_TAIL_RE.search(tail)
         or _PROMOTED_REASONING_TR_PLAN_TAIL_RE.search(tail)
         or _PROMOTED_REASONING_TR_NECESSITY_TAIL_RE.search(tail)
+        or _PROMOTED_REASONING_TR_OPTATIVE_TAIL_RE.search(tail)
     )
 
 
