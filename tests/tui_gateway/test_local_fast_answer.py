@@ -17,6 +17,13 @@ ENDPOINT = {"base_url":fast.BASE,"api_key":"test-only-credential"}
 @pytest.mark.parametrize("text,params,extra,admitted", [
     ("Fotosentez nedir?", {}, {}, True),
     ("What is gravity?", {}, {}, True),
+
+    # Physical Desktop acceptance prompts: static/local questions must be eligible.
+    ("Bir bilgisayarda RAM ile SSD arasındaki temel fark nedir? 3 kısa maddede anlat.", {}, {}, True),
+    ("Sadece 4 yaz: 2+2 kaç?", {}, {}, True),
+    # Backticks remain outside the conservative plain-text grammar.
+    ("Sadece `4` yaz: 2+2 kaç?", {}, {}, False),
+    ("TCP ile UDP arasındaki temel farkı 2 kısa cümlede anlat.", {}, {}, True),
     ("Briefly explain photosynthesis.", {}, {}, True),
     ("Fotosentezi açıkla", {}, {}, True),
     ("merhaba", {}, {}, False),
@@ -42,7 +49,16 @@ ENDPOINT = {"base_url":fast.BASE,"api_key":"test-only-credential"}
     ("What is gravity?", {}, {"resume_runtime_overrides":{"api_key":"x"}}, False),
     ("What is gravity?", {}, {"create_reasoning_override":"high"}, False),
     ("What is gravity?", {}, {"system_prompt":"act as an agent"}, False),
-    ("What is gravity?", {}, {"agent":object()}, False),
+    # Desktop eagerly prebuilds an agent before the first user turn. That alone must
+    # not disqualify an otherwise untouched fresh session from the local fast path.
+    ("What is gravity?", {}, {"agent":object(),"history":[]}, True),
+
+    # Once a non-fast/full-agent turn has changed session history, the shortcut remains closed.
+    ("What is gravity?", {}, {
+        "agent":object(),
+        "history_version":1,
+        "history":[{"role":"user","content":"Earlier full-agent turn"}],
+    }, False),
     ("give an example", {}, {}, False),
 ])
 def test_only_proven_plain_local_questions_are_admitted(text,params,extra,admitted,caplog,tmp_path):
@@ -73,7 +89,7 @@ def test_only_proven_plain_local_questions_are_admitted(text,params,extra,admitt
         assert fast.prepare(session,{},'give an example',config=CONFIG,endpoint=ENDPOINT) is None
 
 
-@pytest.mark.parametrize('mode',['memory','success','queue','ambiguous','http_error','redirect','tool_call','truncated','malformed','cancelled','wrong_model','oversize_usage'])
+@pytest.mark.parametrize('mode',['memory','success','prebuilt_agent','queue','ambiguous','http_error','redirect','tool_call','truncated','malformed','cancelled','wrong_model','oversize_usage'])
 def test_submit_preserves_full_agent_and_durable_turns_without_hidden_retry(mode,monkeypatch,tmp_path,caplog):
     from tui_gateway import server
     from hermes_cli import config,lifecycle
@@ -81,7 +97,27 @@ def test_submit_preserves_full_agent_and_durable_turns_without_hidden_retry(mode
     from hermes_state import SessionDB
     db=SessionDB(db_path=tmp_path/'state.db')
     monkeypatch.setattr(server,'_get_db',lambda:db)
-    monkeypatch.setattr(server,'_schedule_agent_build',lambda *_:None)
+    def schedule_agent_build(session_id):
+        # Reproduce real Desktop session.create timing: the background prebuild can
+        # install the agent before the user submits the very first prompt.
+        if mode == 'prebuilt_agent':
+            live = server._sessions[session_id]
+
+            class PrebuiltAgent:
+                model = fast.MODEL
+                provider = 'llamacpp'
+                session_id = live['session_key']
+                reasoning_config = None
+                service_tier = None
+                api_mode = ''
+                base_url = fast.BASE
+                tools = ()
+                api_key = ENDPOINT['api_key']
+                _api_call_count = 0
+                _user_turn_count = 0
+
+            live['agent'] = PrebuiltAgent()
+    monkeypatch.setattr(server,'_schedule_agent_build',schedule_agent_build)
     monkeypatch.setattr(server,'_schedule_session_cap_enforcement',lambda:None)
     monkeypatch.setattr(server,'_register_session_cwd',lambda *_:None)
     monkeypatch.setattr(config,'load_config',lambda:CONFIG)
@@ -144,7 +180,7 @@ def test_submit_preserves_full_agent_and_durable_turns_without_hidden_retry(mode
         else:
             assert builds.call_count==(1 if mode=='queue' else 0) and not full.called
             assert len(attempts)==(0 if mode=='memory' else 1)
-            if mode in {'memory','success','queue'}:
+            if mode in {'memory','success','prebuilt_agent','queue'}:
                 assert rows[-1]['role']=='assistant'
                 if mode=='queue':
                     assert drain.call_count==1 and session.get('queued_prompt')

@@ -476,6 +476,26 @@ def test_promoted_reasoning_detector_catches_thai_plan_tails():
         assert promoted_reasoning_announces_action(tail), tail
 
 
+def test_promoted_reasoning_detector_catches_turkish_physical_plan_tails():
+    from agent.agent_runtime_helpers import promoted_reasoning_announces_action
+
+    physical_tails = (
+        (
+            "GitHub skill yüklendi. Artık CutMentis control-plane reposundaki açık pull "
+            "requestleri kontrol etmem gerekiyor. Control-plane repo'su "
+            "`/Users/enezcolgecen/cutmentis-control-plane-fresh` olarak belirtilmiş. "
+            "Önce auth durumu kontrol edip, sonra açık PR'leri listeleyeceğim."
+        ),
+        (
+            "GitHub skill'i yükledim. PR'leri listelemek için `gh pr list` komutunu "
+            "kullanacağım. Tüm repo'daki açık PR'leri çekip draft durumunu da göreceğim."
+        ),
+    )
+
+    for tail in physical_tails:
+        assert promoted_reasoning_announces_action(tail), tail
+
+
 def test_promoted_reasoning_detector_ignores_thai_stated_answers():
     from agent.agent_runtime_helpers import promoted_reasoning_announces_action
 

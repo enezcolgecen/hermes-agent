@@ -45,6 +45,36 @@ QUESTION_PATTERNS = (
     re.compile(r"(?P<topic>[a-zçğıöşü ]+) (?:nedir|ne demek|ne anlama gelir)\??", re.I),
     re.compile(r"(?P<topic>[a-zçğıöşü ]+?)(?:['’](?:i|ı|u|ü|yi|yı|yu|yü))? (?:açıkla|kısaca açıkla)\.?", re.I),
 )
+# Additional positive grammars remain deliberately narrow: they prove that
+# the turn is static/local rather than trying to blacklist every unsafe case.
+_SIMPLE_ARITHMETIC_RE = re.compile(
+    r"(?:sadece\s+-?\d{1,6}\s+yaz:\s*)?"
+    r"-?\d{1,6}\s*[+\-*/×÷]\s*-?\d{1,6}\s*(?:kaç|nedir)\??",
+    re.I,
+)
+
+_STATIC_COMPARISON_RE = re.compile(
+    r"(?:bir bilgisayarda\s+)?"
+    r"(?P<a>ram|ssd|tcp|udp)\s+ile\s+"
+    r"(?P<b>ram|ssd|tcp|udp)\s+arasındaki\s+"
+    r"(?:temel\s+)?fark(?:ı)?"
+    r"(?:\s+nedir\?)?"
+    r"(?:\s+\d+\s+kısa\s+(?:maddede|cümlede)\s+anlat\.?)?",
+    re.I,
+)
+
+_STATIC_COMPARISON_PAIRS = {
+    frozenset(("ram", "ssd")),
+    frozenset(("tcp", "udp")),
+}
+
+_FAST_FOLLOWUP_TOPICS = TOPICS | frozenset({
+    "simple arithmetic",
+    "ram/ssd",
+    "tcp/udp",
+})
+
+
 FOLLOWUPS = frozenset({"bunu daha basit açıkla", "bunu kısaca açıkla", "bir örnek ver",
                        "explain that more simply", "give an example"})
 
@@ -70,6 +100,14 @@ def classify(text):
     clean = text.strip().casefold()
     if any(c in clean for c in ("\n", "\r", "@", "/", "\\", "<", ">", "`", "\x00")):
         return None
+
+    if _SIMPLE_ARITHMETIC_RE.fullmatch(clean):
+        return "simple arithmetic"
+    if match := _STATIC_COMPARISON_RE.fullmatch(clean):
+        pair = frozenset((match.group("a"), match.group("b")))
+        if pair in _STATIC_COMPARISON_PAIRS:
+            return "/".join(sorted(pair))
+
     for pattern in QUESTION_PATTERNS:
         if match := pattern.fullmatch(clean):
             topic = match.group("topic").strip()
@@ -93,16 +131,31 @@ def prepare(session, params, text, *, config=None, endpoint=None):
         "turn_isolation", "parent_session_id", "_turn_cancel_requested",
         "create_reasoning_override", "create_service_tier_override", "room_plumbing",
         "pending_hidden", "personality_override",
-        "agent",
     )):
         log.info("local_fast_answer outcome=fallthrough reason=session_behavior")
         return None
     prior = session.get("_local_fast_answer_context")
+    history_version = int(session.get("history_version", 0) or 0)
+    prior_is_current = (
+        isinstance(prior, dict)
+        and prior.get("version") == history_version
+    )
+
+    # Desktop eagerly prebuilds AIAgent after session.create. Agent existence
+    # alone is therefore not proof that a full-agent turn has occurred.
+    # Real history/version activity is, except for current shortcut-owned context.
+    if (
+        (history_version > 0 or bool(session.get("history")))
+        and not prior_is_current
+    ):
+        log.info("local_fast_answer outcome=fallthrough reason=session_behavior")
+        return None
+
     topic = classify(text)
     context = ()
     if isinstance(prior, dict) and prior.get("version") == session.get("history_version", 0):
         if (isinstance(text, str) and text.strip().casefold().rstrip(".?!") in FOLLOWUPS
-                and prior.get("topic") in TOPICS):
+                and prior.get("topic") in _FAST_FOLLOWUP_TOPICS):
             topic = prior["topic"]
         if topic == prior.get("topic"):
             context = tuple(prior.get("messages", ()))

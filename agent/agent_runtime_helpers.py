@@ -3269,6 +3269,18 @@ _PROMOTED_REASONING_PLAN_TAIL_RE = re.compile(
 )
 
 
+# Turkish first-person future-action tails observed in real Desktop tool turns.
+# Only the final sentence/tail is considered, preserving genuine answers that
+# merely mention an earlier plan.
+_PROMOTED_REASONING_TR_PLAN_TAIL_RE = re.compile(
+    r"(?:^|[.!?:\u2026\n]\s*)"
+    r"[^.!?\n]{0,180}"
+    r"\b[a-zçğıöşü]+(?:acağım|eceğim|yacağım|yeceğim)\b"
+    r"[^.!?\n]{0,80}(?:[.:\u2026]+)?\s*$",
+    re.IGNORECASE,
+)
+
+
 def promoted_reasoning_announces_action(text: str) -> bool:
     """Whether promoted reasoning ENDS on a first-person plan to act (stall, not an answer).
 
@@ -3278,7 +3290,11 @@ def promoted_reasoning_announces_action(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
-    return bool(_PROMOTED_REASONING_PLAN_TAIL_RE.search(t[-240:]))
+    tail = t[-240:]
+    return bool(
+        _PROMOTED_REASONING_PLAN_TAIL_RE.search(tail)
+        or _PROMOTED_REASONING_TR_PLAN_TAIL_RE.search(tail)
+    )
 
 
 _INTENT_ACK_ON = {"true", "always", "yes", "on"}
