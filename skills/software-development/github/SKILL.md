@@ -49,6 +49,19 @@ Supporting assets: `scripts/gh-env.sh` + `scripts/git-credential-token.py`
 - Sweep for duplicates before creating anything:
   `gh pr list --search` / `gh issue list --search`.
 
+## Read-only status fast path
+
+For read-only repository, pull-request, issue, branch, CI, or remote-status questions, stay headless and use structured CLI output.
+
+- Never use `--web`, `gh browse`, or open a browser unless the user explicitly asks for browser navigation.
+- Never use general web search merely to discover a GitHub repository that can be resolved from task context, a local Git remote, authenticated GitHub identity, or `gh repo list`.
+- Local session or memory state may identify the repository, but mutable GitHub state such as open, draft, merge, or check status must still be read fresh with `gh`.
+- Resolve repository identity in this order: exact `owner/repo` from task context; current checkout via `git remote get-url origin`; authenticated account plus `gh repo list`; then report resolution failure.
+- CutMentis routing aliases: `CutMentis control-plane` -> `enezcolgecen/cutmentis-control-plane`; `CutMentis product` or `cutiq-platform` -> `enezcolgecen/cutiq-platform`.
+- For an open-PR status request, start with: `gh pr list --repo OWNER/REPO --state open --json number,title,state,isDraft,mergeStateStatus,baseRefName,headRefName,createdAt,url`.
+- Do not run `gh pr view` for every PR when the list response already contains the fields needed to answer.
+- If an individual PR read is necessary, use structured `gh pr view ... --json`. Do not add `--web` unless browser navigation was explicitly requested.
+
 ## Verification
 
 - The workflow's own reference file defines done for that task.

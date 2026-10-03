@@ -42,6 +42,19 @@ echo "Owner: $OWNER, Repo: $REPO"
 
 ---
 
+## Read-only PR Status Fast Path
+
+When the user only asks to inspect, list, summarize, or report current PR state, use the shortest headless read path.
+
+1. Resolve the repository without browser navigation.
+2. CutMentis routing: `CutMentis control-plane` means `enezcolgecen/cutmentis-control-plane`; `CutMentis product` or `cutiq-platform` means `enezcolgecen/cutiq-platform`.
+3. Start with: `gh pr list --repo OWNER/REPO --state open --json number,title,state,isDraft,mergeStateStatus,baseRefName,headRefName,createdAt,url`.
+4. Answer directly from that result when it already contains the requested fields.
+5. Query individual PRs only for fields unavailable from the list response.
+6. Do not use `--web`, `gh browse`, or open a browser unless the user explicitly asks for browser navigation.
+7. Do not use general web search to locate a GitHub repository when task context, local Git remotes, authenticated `gh`, or `gh repo list` can resolve it.
+8. Local session or memory state may route to the repository, but mutable GitHub status must still be verified fresh with `gh`.
+
 ## 1. Branch Creation
 
 This part is pure `git` — identical either way:
