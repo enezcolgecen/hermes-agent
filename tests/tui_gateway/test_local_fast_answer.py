@@ -47,6 +47,14 @@ ENDPOINT = {"base_url":fast.BASE,"api_key":"test-only-credential"}
     ("What is gravity?", {}, {"attached_images":["x"]}, False),
     ("What is gravity?", {}, {"model_override":{"model":"x"}}, False),
     ("What is gravity?", {}, {"resume_runtime_overrides":{"api_key":"x"}}, False),
+    # Real Desktop fresh sessions currently carry the composer default Medium.
+    ("What is gravity?", {}, {
+        "create_reasoning_override":{"enabled":True,"effort":"medium"},
+    }, True),
+    # Non-default reasoning remains fail-closed.
+    ("What is gravity?", {}, {
+        "create_reasoning_override":{"enabled":True,"effort":"high"},
+    }, False),
     ("What is gravity?", {}, {"create_reasoning_override":"high"}, False),
     ("What is gravity?", {}, {"system_prompt":"act as an agent"}, False),
     # Desktop eagerly prebuilds an agent before the first user turn. That alone must
@@ -124,7 +132,12 @@ def test_submit_preserves_full_agent_and_durable_turns_without_hidden_retry(mode
     monkeypatch.setattr(lifecycle,'has_hook',lambda _:True)
     monkeypatch.setattr(lifecycle,'invoke_hook',lambda *a,**kw: [{'final_response':'Memory answer.'}] if mode=='memory' else [])
     monkeypatch.setattr(endpoint,'managed_root',lambda:(fast.BASE.removesuffix('/v1'),ENDPOINT['api_key']))
-    created=server.handle_request({'id':'c','method':'session.create','params':{'source':'desktop','cols':96}})
+    create_params={'source':'desktop','cols':96}
+    if mode == 'prebuilt_agent':
+        # Reproduce the physical Desktop composer state as well as the eager
+        # agent build: fresh session + Medium reasoning + prebuilt AIAgent.
+        create_params['reasoning_effort']='medium'
+    created=server.handle_request({'id':'c','method':'session.create','params':create_params})
     assert 'result' in created,created
     sid=created['result']['session_id'];key=created['result']['stored_session_id'];session=server._sessions[sid]
     events=[]

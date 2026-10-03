@@ -496,6 +496,26 @@ def test_promoted_reasoning_detector_catches_turkish_physical_plan_tails():
         assert promoted_reasoning_announces_action(tail), tail
 
 
+def test_promoted_reasoning_detector_catches_turkish_necessity_tail():
+    from agent.agent_runtime_helpers import promoted_reasoning_announces_action
+
+    physical = (
+        "GitHub PR workflow dosyasını okudum. "
+        "Şimdi CutMentis control-plane reposundaki açık pull requestlerini kontrol etmek için "
+        "gh pr list komutunu kullanacağım. "
+        "Önce hangi repository'lerin control-plane projelerine ait olduğunu bulmam gerekecek."
+    )
+    assert promoted_reasoning_announces_action(physical)
+
+    # Generic necessity statements are not first-person plans to take an action.
+    assert not promoted_reasoning_announces_action(
+        "Bu işlem için daha fazla bilgi gerekecek."
+    )
+    assert not promoted_reasoning_announces_action(
+        "Sonuç olarak ek bir işlem gerekmeyecek."
+    )
+
+
 def test_promoted_reasoning_detector_ignores_thai_stated_answers():
     from agent.agent_runtime_helpers import promoted_reasoning_announces_action
 

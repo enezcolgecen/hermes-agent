@@ -3281,6 +3281,18 @@ _PROMOTED_REASONING_TR_PLAN_TAIL_RE = re.compile(
 )
 
 
+# Turkish first-person necessity tails observed in physical Desktop tool turns:
+# "bulmam gerekecek", "kontrol etmem gerekiyor". Requiring the -mam/-mem
+# first-person verbal noun avoids generic statements such as "bilgi gerekecek".
+_PROMOTED_REASONING_TR_NECESSITY_TAIL_RE = re.compile(
+    r"(?:^|[.!?:\u2026\n]\s*)"
+    r"[^.!?\n]{0,180}"
+    r"\b[a-zçğıöşü]+(?:mam|mem)\s+(?:gerekecek|gerekiyor)\b"
+    r"[^.!?\n]{0,80}(?:[.:\u2026]+)?\s*$",
+    re.IGNORECASE,
+)
+
+
 def promoted_reasoning_announces_action(text: str) -> bool:
     """Whether promoted reasoning ENDS on a first-person plan to act (stall, not an answer).
 
@@ -3294,6 +3306,7 @@ def promoted_reasoning_announces_action(text: str) -> bool:
     return bool(
         _PROMOTED_REASONING_PLAN_TAIL_RE.search(tail)
         or _PROMOTED_REASONING_TR_PLAN_TAIL_RE.search(tail)
+        or _PROMOTED_REASONING_TR_NECESSITY_TAIL_RE.search(tail)
     )
 
 

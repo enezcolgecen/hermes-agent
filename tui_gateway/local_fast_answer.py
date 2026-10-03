@@ -129,11 +129,27 @@ def prepare(session, params, text, *, config=None, endpoint=None):
         "attached_images", "model_override", "resume_runtime_overrides", "system_prompt",
         "system_prompt_override", "persona", "_hosted_room_task", "_compute_host",
         "turn_isolation", "parent_session_id", "_turn_cancel_requested",
-        "create_reasoning_override", "create_service_tier_override", "room_plumbing",
+        "create_service_tier_override", "room_plumbing",
         "pending_hidden", "personality_override",
     )):
         log.info("local_fast_answer outcome=fallthrough reason=session_behavior")
         return None
+    # Desktop normally creates a fresh local session with the composer at
+    # Medium reasoning. That default must not force an otherwise proven static
+    # question onto the full-agent path. Other reasoning overrides remain
+    # fail-closed.
+    reasoning_override = session.get("create_reasoning_override")
+    if reasoning_override is not None:
+        desktop_medium = (
+            isinstance(reasoning_override, dict)
+            and reasoning_override.get("enabled") is True
+            and str(reasoning_override.get("effort") or "").strip().casefold() == "medium"
+            and set(reasoning_override).issubset({"enabled", "effort"})
+        )
+        if not desktop_medium:
+            log.info("local_fast_answer outcome=fallthrough reason=session_behavior")
+            return None
+
     prior = session.get("_local_fast_answer_context")
     history_version = int(session.get("history_version", 0) or 0)
     prior_is_current = (
