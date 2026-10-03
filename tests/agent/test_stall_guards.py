@@ -516,6 +516,22 @@ def test_promoted_reasoning_detector_catches_turkish_necessity_tail():
     )
 
 
+def test_stall_continuation_budget_rearms_only_after_tool_progress():
+    from agent.agent_runtime_helpers import (
+        rearm_stall_continuation_budget_after_tool_progress,
+    )
+
+    # Exact physical failure class: two earlier continuations must not block
+    # recovery once the model actually performed another tool call.
+    assert rearm_stall_continuation_budget_after_tool_progress(2, 1) == 0
+    assert rearm_stall_continuation_budget_after_tool_progress(1, 1) == 0
+
+    # No new tool work: preserve the existing consecutive-stall budget.
+    assert rearm_stall_continuation_budget_after_tool_progress(2, 0) == 2
+    assert rearm_stall_continuation_budget_after_tool_progress(1, 0) == 1
+    assert rearm_stall_continuation_budget_after_tool_progress(0, 0) == 0
+
+
 def test_promoted_reasoning_after_tool_visibility_retry_is_structural():
     from agent.agent_runtime_helpers import (
         promoted_reasoning_after_tool_needs_visibility_retry,

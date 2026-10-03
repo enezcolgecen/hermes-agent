@@ -157,7 +157,9 @@ def finish_text_response(
     from agent.agent_runtime_helpers import (
         intent_ack_continuation_mode, looks_like_degenerate_final,
         promoted_reasoning_after_tool_needs_visibility_retry,
-        promoted_reasoning_announces_action, tool_results_this_turn, trailing_continue_intent,
+        promoted_reasoning_announces_action,
+        rearm_stall_continuation_budget_after_tool_progress,
+        tool_results_this_turn, trailing_continue_intent,
     )
 
     _ack_mode = intent_ack_continuation_mode(agent)
@@ -169,6 +171,20 @@ def finish_text_response(
     # "complete" (#111761). Same cap, so a model that never acts still ends after 2 nudges.
     _stall_text = agent._strip_think_blocks(final_response or "")
     _tool_rows = tool_results_this_turn(messages)
+
+    # The shared limit is a consecutive-stall backstop, not a lifetime limit
+    # for an otherwise-progressing tool turn. Genuine new tool results re-arm
+    # it; a reasoning/nudge/reasoning loop with no tool progress does not.
+    _prior_ack_continuations = codex_ack_continuations
+    codex_ack_continuations = rearm_stall_continuation_budget_after_tool_progress(
+        codex_ack_continuations, _tool_rows
+    )
+    if codex_ack_continuations != _prior_ack_continuations:
+        logger.info(
+            "Stall continuation budget re-armed after %d new tool result(s) "
+            "(%d/2 -> 0/2)",
+            _tool_rows, _prior_ack_continuations,
+        )
 
     # A clean stop that contains only promoted reasoning after actual tool
     # results is not yet a visible task completion. This decision is structural,

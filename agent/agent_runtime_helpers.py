@@ -3343,6 +3343,19 @@ def promoted_reasoning_after_tool_needs_visibility_retry(
     )
 
 
+def rearm_stall_continuation_budget_after_tool_progress(
+    continuation_count: int, tool_rows: int
+) -> int:
+    """Re-arm the consecutive-stall budget after genuine new tool progress.
+
+    The two-continuation cap remains intact when the model keeps stopping
+    without doing work. A tool-result row after the newest user row proves
+    that the model actually advanced the task, so a later reasoning-only
+    stop begins a fresh consecutive-stall window.
+    """
+    return 0 if tool_rows > 0 else continuation_count
+
+
 _INTENT_ACK_ON = {"true", "always", "yes", "on"}
 _INTENT_ACK_OFF = {"false", "never", "no", "off"}
 
