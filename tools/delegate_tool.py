@@ -283,17 +283,17 @@ def _build_child_agent(
         child._credential_pool = child_pool
 
     _attach_child(parent_agent, child)  # interrupt propagation
-    # spawn_requested now — the child may queue for seconds when the pool is
-    # saturated — then the subagent_start lifecycle hook.
+    # Keep launch identity stable while the child queues; observe subagent_start
+    # only at the final effective input boundary, after workspace seeding.
     _safe_progress(child_progress_cb, "subagent.spawn_requested", preview=goal)
-    with _quiet("subagent_start hook invocation failed", exc_info=True):
-        from hermes_cli.lifecycle import invoke_hook as _invoke_hook
-        _invoke_hook(
-            "subagent_start", parent_session_id=parent_sid,
-            parent_turn_id=getattr(parent_agent, "_current_turn_id", "") or "", parent_subagent_id=parent_subagent_id,
-            child_session_id=getattr(child, "session_id", None), child_subagent_id=subagent_id,
-            child_role=effective_role, child_goal=goal,
-        )
+    child._delegate_start_context = {
+        "parent_session_id": parent_sid,
+        "parent_turn_id": getattr(parent_agent, "_current_turn_id", "") or "",
+        "parent_subagent_id": parent_subagent_id,
+        "child_session_id": getattr(child, "session_id", None),
+        "child_subagent_id": subagent_id,
+        "child_role": effective_role,
+    }
     return child
 
 def _run_single_child(
@@ -690,8 +690,8 @@ DELEGATE_TASK_SCHEMA = {
                 },
                 "description": "(rebuilt at get_definitions() time)",
             },
-            # `background` (bool) is also accepted — DEPRECATED, ignored: top-level
-            # delegations always run in the background. Unadvertised; do not re-add.
+            # An explicit boolean `background=false` is accepted for synchronous
+            # callers. The model-facing async default stays unadvertised; do not re-add.
             "action": _p(
                 "string",
                 "Default 'spawn'. Live control of running children: "
@@ -718,11 +718,14 @@ DELEGATE_TASK_SCHEMA = {
 from tools.registry import registry, tool_error
 
 def _model_background_value(args: dict, parent_agent=None) -> bool:
-    """Background flag for the MODEL-facing dispatch path (registry fallback). Top-level delegations always run in the
-    background — the model does not choose — for single tasks and fan-out batches alike (one async unit, one
-    consolidated result); an orchestrator subagent (depth > 0) is the exception since it needs its workers' results
-    within its own turn. The live path is ``run_agent._dispatch_delegate_task``; this mirrors it for the rare case
-    the intercept is bypassed. Direct Python callers keep the synchronous default."""
+    """Shared model-facing policy: explicit boolean false opts into synchronous execution.
+
+    Otherwise keep the existing defaults: top-level async, depth>0 synchronous,
+    including explicit true and non-boolean inputs. Direct Python callers retain
+    their own synchronous default.
+    """
+    if args.get("background") is False:
+        return False
     return not getattr(parent_agent, "_delegate_depth", 0) > 0
 
 _MODEL_HIDDEN_TASK_FIELDS = {"acp_command", "acp_args"}

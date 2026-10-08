@@ -321,9 +321,9 @@ class TestDelegateTask(unittest.TestCase):
                 child_db = kwargs["session_db"]
                 self.assertIsInstance(child_db, SessionDB)
                 self.assertIsNot(child_db, parent_db)
-                self.assertEqual(
-                    str(child_db.db_path), str(parent_db.db_path)
-                )
+                # Same physical DB is the isolation invariant, including macOS
+                # /var -> /private/var aliases used by the canonical runner.
+                self.assertTrue(Path(child_db.db_path).samefile(parent_db.db_path))
             finally:
                 if child_db is not None:
                     child_db.close()
@@ -1448,6 +1448,28 @@ class TestDelegationReasoningEffort(unittest.TestCase):
 
 class TestDispatchDelegateTask(unittest.TestCase):
     """Tests for the _dispatch_delegate_task helper and full param forwarding."""
+
+    def test_explicit_synchronous_request_preserves_other_dispatch_defaults(self):
+        """Live and registry paths honor only boolean false; nested parents stay synchronous."""
+        from run_agent import AIAgent
+        from tools.registry import registry
+
+        absent = object()
+        for depth in (0, 1):
+            for background in (absent, False, True, None, 0, "false"):
+                for shape in ({"goal": "Review this evidence"}, {"tasks": [{"goal": "Review this evidence"}]}):
+                    args: dict[str, object] = dict(shape)
+                    if background is not absent:
+                        args["background"] = background
+                    parent = _make_mock_parent(depth=depth)
+                    expected = depth == 0 and background is not False
+                    with self.subTest(depth=depth, background=background, shape=shape), \
+                            patch("tools.delegate_tool.delegate_task", return_value="{}") as dispatch:
+                        AIAgent._dispatch_delegate_task(parent, args)
+                        self.assertIs(dispatch.call_args.kwargs["background"], expected)
+                        dispatch.reset_mock()
+                        registry.dispatch("delegate_task", args, parent_agent=parent)
+                        self.assertIs(dispatch.call_args.kwargs["background"], expected)
 
     def test_model_acp_args_not_forwarded(self):
         """The live model dispatch path strips hidden ACP transport args."""

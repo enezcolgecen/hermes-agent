@@ -719,6 +719,10 @@ class _ChildRun:
     parent_task_id: Optional[str] = None
     wall_start: float = 0.0
     parent_reads_snapshot: list = field(default_factory=list)
+    requested_goal: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.requested_goal = self.goal
 
     def elapsed(self) -> float:
         return round(time.monotonic() - self.child_start, 2)
@@ -854,6 +858,30 @@ class _ChildRun:
             worker_thread_holder["t"] = threading.current_thread()
             from agent.delegation_context import delegated_child_context
             with delegated_child_context(str(getattr(child, "session_id", "") or "")):
+                # This is the final effective text, after worktree and image notes;
+                # never emit image/base64 parts to lifecycle observers.
+                effective_text = user_message if isinstance(user_message, str) else "\n".join(
+                    part["text"] for part in user_message
+                    if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+                )
+                with _quiet("subagent_start hook invocation failed", exc_info=True):
+                    from hermes_cli.lifecycle import invoke_hook as _invoke_hook
+                    start_context = getattr(child, "_delegate_start_context", None)
+                    if not isinstance(start_context, dict):
+                        start_context = {
+                            "parent_session_id": getattr(self.parent_agent, "session_id", "") or "",
+                            "parent_turn_id": getattr(self.parent_agent, "_current_turn_id", "") or "",
+                            "parent_subagent_id": getattr(self.parent_agent, "_subagent_id", None),
+                            "child_session_id": getattr(child, "session_id", None),
+                            "child_subagent_id": self.subagent_id,
+                            "child_role": getattr(child, "_delegate_role", None),
+                        }
+                    _invoke_hook(
+                        "subagent_start", **start_context, child_goal=effective_text,
+                        requested_child_goal=self.requested_goal,
+                        worktree_context=dict(self.worktree_info) if self.worktree_info else None,
+                        child_input_is_text=isinstance(user_message, str),
+                    )
                 return child.run_conversation(
                     user_message=user_message, task_id=self.child_task_id, stream_callback=self.relay_text,
                 )
