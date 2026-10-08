@@ -12,8 +12,10 @@ from tools.terminal_tool import get_session_cwd, record_session_cwd
 
 
 def _git(repo, *args):
-    return subprocess.check_output(["git", "-C", str(repo), *args], text=True,
-                                   encoding="utf-8", errors="replace").strip()
+    return subprocess.check_output(
+        ["git", "-C", str(repo), *args],
+        text=True, encoding="utf-8", errors="replace",
+    ).strip()
 
 
 @pytest.mark.parametrize("isolation", ["off", "clean", "dirty"])
