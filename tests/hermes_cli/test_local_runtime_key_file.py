@@ -7,16 +7,16 @@ import pytest
 from hermes_cli.local_runtime import supervisor
 
 
-@pytest.mark.parametrize("condition", ["new", "existing", "invalid", "symlink", "unwritable"])
+@pytest.mark.parametrize("condition", ["new", "existing", "bom", "invalid", "bom_invalid", "symlink", "unwritable"])
 def test_private_persistent_key_or_closed_startup(tmp_path, monkeypatch, condition):
     monkeypatch.setattr(supervisor, "runtimes_root", lambda: tmp_path)
     path = tmp_path / ".api_key"
     original = "test-local-credential-value-123456789"
-    if condition == "existing":
-        path.write_text(original)
+    if condition in ("existing", "bom"):
+        path.write_text(original, encoding="utf-8-sig" if condition == "bom" else "utf-8")
         path.chmod(0o644)
-    elif condition == "invalid":
-        path.write_text("short")
+    elif condition in ("invalid", "bom_invalid"):
+        path.write_text("short", encoding="utf-8-sig" if condition == "bom_invalid" else "utf-8")
     elif condition == "symlink":
         target = tmp_path / "unrelated"
         target.write_text(original)
@@ -25,15 +25,15 @@ def test_private_persistent_key_or_closed_startup(tmp_path, monkeypatch, conditi
         def deny(*args, **kwargs):
             raise PermissionError("key file denied")
         monkeypatch.setattr(supervisor.os, "open", deny)
-    if condition in ("invalid", "symlink", "unwritable"):
+    if condition in ("invalid", "bom_invalid", "symlink", "unwritable"):
         with pytest.raises((OSError, RuntimeError)):
             supervisor._stable_api_key()
         if condition == "symlink":
             assert target.read_text() == original
         return
     key = supervisor._stable_api_key()
-    assert key == path.read_text() == supervisor._stable_api_key()
-    if condition == "existing":
+    assert key == path.read_text(encoding="utf-8-sig") == supervisor._stable_api_key()
+    if condition in ("existing", "bom"):
         assert key == original
     if os.name != "nt":
         assert stat.S_IMODE(path.stat().st_mode) == 0o600

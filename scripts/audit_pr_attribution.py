@@ -9,7 +9,8 @@ you are about to push:
     python3 scripts/audit_pr_attribution.py --fix      # create mapping files
 
 Logic (kept in sync with contributor-check.yml):
-  - scans ``git log $(git merge-base origin/main HEAD)..HEAD --format=%ae``
+  - scans commits relative to the actual PR base (--base, GITHUB_BASE_REF,
+    or the current branch's GitHub PR metadata), never unrelated fork main
   - skips teknium/bot emails and ``<id>+<login>@users.noreply.github.com``
     (CI auto-resolves those)
   - everything else must have ``contributors/emails/<email>`` or a legacy
@@ -26,6 +27,7 @@ Logic (kept in sync with contributor-check.yml):
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -55,9 +57,26 @@ def run(*args: str, check: bool = True) -> str:
     return result.stdout.strip()
 
 
-def new_emails() -> list[str]:
-    base = run("git", "merge-base", "origin/main", "HEAD")
-    log = run("git", "log", f"{base}..HEAD", "--format=%ae", "--no-merges", check=False)
+def resolve_base_ref(explicit: str | None = None) -> str:
+    """No network needed in CI or with --base. Ambiguous local context fails closed."""
+    ref = explicit
+    if ref is None and os.environ.get("GITHUB_BASE_REF"):
+        ref = "refs/remotes/origin/" + os.environ["GITHUB_BASE_REF"]
+    if ref is None:
+        try:
+            metadata = json.loads(run("gh", "pr", "view", "--json", "baseRefName"))
+            ref = "refs/remotes/origin/" + metadata["baseRefName"]
+        except (RuntimeError, FileNotFoundError, json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise RuntimeError("Cannot determine actual PR base; supply --base REF") from exc
+    if not isinstance(ref, str) or not ref or ref.startswith("-") or any(c.isspace() for c in ref):
+        raise RuntimeError("Invalid attribution base ref")
+    return run("git", "rev-parse", "--verify", ref + "^{commit}")
+
+
+def new_emails(base_ref: str | None = None) -> list[str]:
+    selected = resolve_base_ref(base_ref)
+    base = run("git", "merge-base", selected, "HEAD")
+    log = run("git", "log", f"{base}..HEAD", "--format=%ae", "--no-merges")
     return sorted({e for e in log.splitlines() if e.strip()})
 
 
@@ -99,13 +118,31 @@ def resolve_login(email: str) -> tuple[str, str] | None:
     return None
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fix", action="store_true",
                         help="auto-create contributors/emails/ mapping files")
-    args = parser.parse_args()
+    parser.add_argument("--base", help="actual PR base ref or exact commit; required when no PR metadata is available")
+    parser.add_argument("--review-status", type=Path, help="write the CI review-status JSON artifact and step output")
+    args = parser.parse_args(argv)
 
-    unmapped = [e for e in new_emails() if not is_mapped(e)]
+    try:
+        unmapped = [e for e in new_emails(args.base) if not is_mapped(e)]
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if args.review_status is not None:
+        statuses = [] if not unmapped else [{"source": "contributor attribution", "results": [{
+            "kind": "action_required", "title": "Unmapped contributor email(s)",
+            "summary": "New PR contributor email(s) have no mapping.",
+            "detail": "\n".join(unmapped),
+            "how_to_fix": "Run scripts/audit_pr_attribution.py --base ACTUAL_BASE --fix, or scripts/add_contributor.py EMAIL VERIFIED_LOGIN; preserve contributor identity.",
+        }]}]
+        serialized = json.dumps(statuses, ensure_ascii=False, separators=(",", ":"))
+        args.review_status.write_text(serialized + "\n", encoding="utf-8")
+        if os.environ.get("GITHUB_OUTPUT"):
+            with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                output.write("review_status=" + serialized + "\n")
     if not unmapped:
         print("✅ All contributor emails on this branch are mapped.")
         return 0

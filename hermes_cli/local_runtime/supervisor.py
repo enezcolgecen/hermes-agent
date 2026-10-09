@@ -100,7 +100,7 @@ def _stable_api_key() -> str:
             stream.flush()
             os.fsync(stream.fileno())
         return key
-    with os.fdopen(fd, "r", encoding="utf-8") as stream:
+    with os.fdopen(fd, "r", encoding="utf-8-sig") as stream:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or (hasattr(os, "getuid") and info.st_uid != os.getuid()):
             raise RuntimeError("managed API key must be an owned regular file")
