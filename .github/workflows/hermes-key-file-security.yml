@@ -1,0 +1,100 @@
+name: Hermes Windows key-file focused security verification
+
+on:
+  pull_request:
+    types: [labeled]
+    branches: [feature/hermes-fork-ci-portability-v1]
+
+permissions:
+  contents: read
+
+jobs:
+  key-file:
+    if: >-
+      github.event.label.name == 'hermes-key-file-security' &&
+      github.repository == 'enezcolgecen/hermes-agent' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'feature/hermes-windows-key-file-security-v1' &&
+      github.event.pull_request.base.sha == 'df972bf8adfa520fdf9a5db9e691ec4068e8c706'
+    name: Key-file security (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, windows-latest, windows-11-arm]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout exact labeled source SHA
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Assert source and record native host
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain)"
+          mkdir key-file-evidence
+          printf 'source_sha=%s\nrunner=%s/%s\n' "$EXPECTED_SHA" "$RUNNER_OS" "$RUNNER_ARCH" > key-file-evidence/source.txt
+      - name: Prepare existing pinned Python and UV only
+        uses: ./.github/actions/setup-pm
+        with:
+          cache: 'false'
+          cache-python: 'false'
+          cache-node: 'false'
+          archive-inputs: 'false'
+      - name: Prepare minimal isolated key-file test tools through PM
+        # Existing exact versions from this checkout's uv.lock; no new deps or
+        # core runtime install, compiler setup, activation or broad test matrix.
+        run: |
+          python -m scripts.ci.python_packages pytest==9.1.1 pytest-asyncio==1.3.0 psutil==7.2.2 \
+            PyYAML==6.0.3 ruamel.yaml==0.18.16 python-dotenv==1.2.2 rich==14.3.3
+      - name: Run only key-file security regressions once
+        env:
+          HERMES_TEST_FILE_RETRIES: '0'
+        run: |
+          set -euo pipefail
+          cp .github/scripts/key-file-security-guard.py key_file_security_guard.py
+          # Plugin __file__ stays in the harness so its receipt has a fixed path.
+          cat > key_file_security_guard.py <<'PY'
+          import runpy
+          from pathlib import Path
+          globals().update(runpy.run_path(str(Path(__file__).resolve().parent / ".github/scripts/key-file-security-guard.py")))
+          PY
+          set +e
+          bash scripts/run_tests.sh tests/hermes_cli/test_local_runtime_key_file.py -j 1 \
+            "--override-ini=addopts=-m 'not integration and not live' -p key_file_security_guard" \
+            2>&1 | tee key-file-evidence/tests.log
+          result=${PIPESTATUS[0]}
+          set -e
+          rm key_file_security_guard.py
+          git diff --exit-code
+          exit "$result"
+      - name: Require nonempty test and audit result
+        if: always()
+        run: |
+          "$HERMES_PYTHON" - <<'PY'
+          import json, pathlib, re
+          p = pathlib.Path("key-file-evidence")
+          a = json.loads((p / "audit.json").read_text(encoding="utf-8"))
+          if a["exitstatus"] != 0 or a["collected"] <= 0 or a["blocked_attempts"]:
+              raise SystemExit("Failed, empty or forbidden-execution security run")
+          summary = re.search(r"=== Summary:.*", (p / "tests.log").read_text(encoding="utf-8"))
+          if summary is None:
+              raise SystemExit("Canonical runner summary missing")
+          print(summary.group())
+          PY
+      - name: Preserve focused results including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: key-file-${{ matrix.runner }}
+          path: key-file-evidence/
+          retention-days: 14
+          if-no-files-found: error
+
