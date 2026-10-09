@@ -95,7 +95,7 @@ jobs:
             tests/scripts/test_ci_portability.py \
             tests/hermes_cli/test_local_runtime_key_file.py \
             -j 4 -k 'TestDispatchDelegateTask or final_input_observation or stacked_pr or unavailable_or_invalid_pr_base or ci_workflow_closure or standard_runner_shards or private_persistent_key or launch_uses_file or windows_key_file_rejects_redirects_even_during_open or windows_validated_handles_deny_replacement_until_io_finishes' \
-            "--override-ini=addopts=-m 'not integration and not live' -p pr3_provider_free_guard" \
+            "--override-ini=addopts=-m 'not integration and not live' -p final_head_provider_free_guard" \
             2>&1 | tee ../verification/verification-evidence/focused-tests.log
           result=${PIPESTATUS[0]}
           set -e
