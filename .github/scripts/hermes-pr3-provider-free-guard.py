@@ -2,13 +2,38 @@
 import collections
 import json
 import pathlib
+import socket
 import sys
+import traceback
+import weakref
 
 blocked = collections.Counter()
 processes = collections.Counter()
+listeners = weakref.WeakSet()
+internal_socketpairs = 0
 
 
 def audit(event, args):
+    global internal_socketpairs
+    if event == "socket.bind":
+        address = args[1]
+        if isinstance(address, tuple) and address[0] in {"127.0.0.1", "::1"} and address[1] == 0:
+            listeners.add(args[0])
+    if event == "socket.connect":
+        address = args[1]
+        # Windows asyncio uses the stdlib's owned TCP socketpair for its wakeup
+        # pipe. Accept only that exact stdlib frame and same-process listener.
+        stdlib_pair = any(frame.name == "_fallback_socketpair" and
+                          pathlib.Path(frame.filename).resolve() == pathlib.Path(socket.__file__).resolve()
+                          for frame in traceback.extract_stack())
+        if stdlib_pair and isinstance(address, tuple) and address[0] in {"127.0.0.1", "::1"}:
+            for listener in list(listeners):
+                try:
+                    if listener.getsockname() == address:
+                        internal_socketpairs += 1
+                        return
+                except OSError:
+                    pass
     if event in {"socket.connect", "socket.getaddrinfo", "socket.sendto"}:
         blocked["network_attempts"] += 1
         raise RuntimeError("Provider-free verification forbids test networking")
@@ -51,6 +76,7 @@ def pytest_sessionfinish(session, exitstatus):
         "collected": session.testscollected,
         "blocked_attempts": dict(blocked),
         "subprocess_counts": dict(processes),
+        "stdlib_owned_socketpair_connections": internal_socketpairs,
         "real_provider_calls": 0,
         "real_codex_calls": 0,
         "actual_delegate_spawns": 0,
