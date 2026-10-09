@@ -13,6 +13,30 @@ listeners = weakref.WeakSet()
 internal_socketpairs = 0
 
 
+def process_argv(command):
+    if isinstance(command, (list, tuple)) and command:
+        return command
+    if sys.platform == "win32" and isinstance(command, str):
+        # Windows audit receives CreateProcess command-line text even when the
+        # caller supplied argv. Use the OS parser, never POSIX shlex or a shell.
+        import ctypes
+        from ctypes import wintypes
+        count = ctypes.c_int()
+        parser = ctypes.windll.shell32.CommandLineToArgvW
+        parser.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+        parser.restype = ctypes.POINTER(wintypes.LPWSTR)
+        free = ctypes.windll.kernel32.LocalFree
+        free.argtypes = [wintypes.HLOCAL]
+        free.restype = wintypes.HLOCAL
+        values = parser(command, ctypes.byref(count))
+        if values:
+            try:
+                return [values[i] for i in range(count.value)]
+            finally:
+                free(ctypes.cast(values, wintypes.HLOCAL))
+    raise RuntimeError("Provider-free verification requires classified argv")
+
+
 def audit(event, args):
     global internal_socketpairs
     if event == "socket.bind":
@@ -38,11 +62,13 @@ def audit(event, args):
         blocked["network_attempts"] += 1
         raise RuntimeError("Provider-free verification forbids test networking")
     if event == "subprocess.Popen":
-        command = args[1]
-        if not isinstance(command, (list, tuple)) or not command:
+        try:
+            command = process_argv(args[1])
+        except RuntimeError:
             blocked["unclassified_process"] += 1
-            raise RuntimeError("Provider-free verification requires classified argv")
-        binary = pathlib.Path(str(command[0])).name.lower().removesuffix(".exe")
+            raise
+        # An explicit executable overrides argv[0] in CreateProcess/Popen.
+        binary = pathlib.Path(str(args[0] or command[0])).name.lower().removesuffix(".exe")
         processes[binary] += 1
         if binary not in {"git", "sysctl", "vm_stat"}:
             blocked["process_attempts"] += 1
