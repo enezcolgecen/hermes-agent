@@ -48,4 +48,3 @@ def pytest_sessionfinish(session, exitstatus):
     output.mkdir(exist_ok=True)
     (output / "audit.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print("KEY_FILE_AUDIT " + json.dumps(report))
-

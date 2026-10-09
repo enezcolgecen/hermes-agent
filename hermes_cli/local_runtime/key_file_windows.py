@@ -97,4 +97,3 @@ def open_key_file(path):
             raise
         stack.enter_context(stream)
         yield stream, created
-
