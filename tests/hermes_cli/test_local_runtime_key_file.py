@@ -24,7 +24,11 @@ def test_private_persistent_key_or_closed_startup(tmp_path, monkeypatch, conditi
     elif condition == "unwritable":
         def deny(*args, **kwargs):
             raise PermissionError("key file denied")
-        monkeypatch.setattr(supervisor.os, "open", deny)
+        if os.name == "nt":
+            from hermes_cli.local_runtime import key_file_windows
+            monkeypatch.setattr(key_file_windows, "_open_handle", deny)
+        else:
+            monkeypatch.setattr(supervisor.os, "open", deny)
     if condition in ("invalid", "bom_invalid", "symlink", "unwritable"):
         with pytest.raises((OSError, RuntimeError)):
             supervisor._stable_api_key()
@@ -70,3 +74,71 @@ def test_launch_uses_file_and_redacts_diagnostics_or_refuses(tmp_path, monkeypat
         assert sup.api_key not in str(supervisor._redacted_command(["embedded=" + sup.api_key], sup.api_key))
     finally:
         sup.stop()
+
+@pytest.mark.platforms("windows")
+@pytest.mark.parametrize("condition", ["parent_symlink", "parent_junction", "swap_leaf_before", "swap_parent_before"])
+def test_windows_key_file_rejects_redirects_even_during_open(tmp_path, monkeypatch, condition):
+    import _winapi
+    from hermes_cli.local_runtime import key_file_windows as windows
+
+    target = tmp_path / "target"
+    target.mkdir()
+    secret = "fixture-credential-value-123456789"
+    (target / ".api_key").write_text(secret, encoding="utf-8")
+    home = tmp_path / "home"
+    if condition == "parent_symlink":
+        home.symlink_to(target, target_is_directory=True)
+    elif condition == "parent_junction":
+        _winapi.CreateJunction(str(target), str(home))
+    else:
+        home.mkdir()
+        (home / ".api_key").write_text(secret, encoding="utf-8")
+    monkeypatch.setattr(supervisor, "runtimes_root", lambda: home)
+    original = windows._open_handle
+
+    def race(path, access, share, creation, flags):
+        if condition == "swap_leaf_before" and path == home / ".api_key" and creation == 3:
+            path.unlink()
+            path.symlink_to(target / ".api_key")
+        if condition == "swap_parent_before" and path == home:
+            home.rename(tmp_path / "moved")
+            _winapi.CreateJunction(str(target), str(home))
+        return original(path, access, share, creation, flags)
+
+    monkeypatch.setattr(windows, "_open_handle", race)
+    with pytest.raises((OSError, RuntimeError)):
+        supervisor._stable_api_key()
+    assert (target / ".api_key").read_text(encoding="utf-8") == secret
+
+
+@pytest.mark.platforms("windows")
+@pytest.mark.parametrize("replace", ["file", "parent"])
+def test_windows_validated_handles_deny_replacement_until_io_finishes(tmp_path, monkeypatch, replace):
+    import msvcrt
+
+    home = tmp_path / "home"
+    home.mkdir()
+    key_path = home / ".api_key"
+    secret = "fixture-credential-value-123456789"
+    key_path.write_text(secret, encoding="utf-8")
+    monkeypatch.setattr(supervisor, "runtimes_root", lambda: home)
+    original = msvcrt.open_osfhandle
+    attempted = []
+
+    def race(handle, flags):
+        # This runs AFTER native validation, before the stream reads a byte.
+        attempted.append(replace)
+        with pytest.raises(OSError):
+            if replace == "file":
+                key_path.unlink()
+            else:
+                home.rename(tmp_path / "moved")
+        return original(handle, flags)
+
+    monkeypatch.setattr(msvcrt, "open_osfhandle", race)
+    assert supervisor._stable_api_key() == secret
+    assert attempted == [replace]
+    assert key_path.read_text(encoding="utf-8") == secret
+    # Locks are not leaked after the operation.
+    key_path.unlink()
+    home.rename(tmp_path / "released")

@@ -9,7 +9,7 @@ token, generous budget, reasoning_content scanned); always dial 127.0.0.1 — re
 
 from __future__ import annotations
 
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from functools import lru_cache
 import json
 import logging
@@ -86,21 +86,26 @@ def _stable_api_key() -> str:
     connection errors.
     """
     key_path = api_key_path()
-    key_path.parent.mkdir(parents=True, exist_ok=True)
-    # Never follow a credential symlink or fall back to a key carried in argv.
-    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(key_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        fd = os.open(key_path, flags)
-    else:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+    with ExitStack() as stack:
+        if os.name == "nt":
+            from hermes_cli.local_runtime.key_file_windows import open_key_file
+            stream, created = stack.enter_context(open_key_file(key_path))
+        else:
+            key_path.parent.mkdir(parents=True, exist_ok=True)
+            flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+            created = True
+            try:
+                fd = os.open(key_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                created = False
+                fd = os.open(key_path, flags)
+            stream = stack.enter_context(os.fdopen(fd, "w" if created else "r", encoding="utf-8" if created else "utf-8-sig"))
+        if created:
             key = secrets.token_urlsafe(24)
             stream.write(key)
             stream.flush()
             os.fsync(stream.fileno())
-        return key
-    with os.fdopen(fd, "r", encoding="utf-8-sig") as stream:
+            return key
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or (hasattr(os, "getuid") and info.st_uid != os.getuid()):
             raise RuntimeError("managed API key must be an owned regular file")
