@@ -90,8 +90,7 @@ def open_key_file(path):
         # validated handle. Ancestor locks live until the stream is closed.
         try:
             os.set_inheritable(fd, False)
-            stream = os.fdopen(fd, "w" if created else "r",
-                               encoding="utf-8" if created else "utf-8-sig")
+            stream = os.fdopen(fd, "w" if created else "r", encoding="utf-8" if created else "utf-8-sig")
         except BaseException:
             os.close(fd)
             raise

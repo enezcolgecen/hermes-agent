@@ -99,8 +99,7 @@ def _stable_api_key() -> str:
             except FileExistsError:
                 created = False
                 fd = os.open(key_path, flags)
-            stream = stack.enter_context(os.fdopen(fd, "w" if created else "r",
-                                                   encoding="utf-8" if created else "utf-8-sig"))
+            stream = stack.enter_context(os.fdopen(fd, "w" if created else "r", encoding="utf-8" if created else "utf-8-sig"))
         if created:
             key = secrets.token_urlsafe(24)
             stream.write(key)
