@@ -1,0 +1,136 @@
+name: Hermes final-head provider-free verification
+
+on:
+  pull_request:
+    types: [labeled]
+    branches: [feature/hermes-windows-key-file-security-v1]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermes-final-head-verification-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  focused:
+    if: >-
+      github.event.label.name == 'hermes-pr3-provider-free' &&
+      github.repository == 'enezcolgecen/hermes-agent' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'feature/hermes-final-head-provider-free-ci-v1' &&
+      github.event.pull_request.base.sha == '545af8db206beb2d6db1437859383d0575500a96'
+    name: PR5 final-head focused regressions (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, windows-latest, windows-11-arm]
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    steps:
+      - name: Checkout exact PR5 source
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          repository: enezcolgecen/hermes-agent
+          ref: 545af8db206beb2d6db1437859383d0575500a96
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout verification harness
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: verification
+          persist-credentials: false
+      - name: Verify pinned source and event boundary
+        env:
+          VERIFICATION_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_ACTION: ${{ github.event.action }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 545af8db206beb2d6db1437859383d0575500a96
+          test "$PR_BASE_SHA" = 545af8db206beb2d6db1437859383d0575500a96
+          test "$EVENT_ACTION" = labeled
+          test -z "$(git status --porcelain)"
+          mkdir -p ../verification/verification-evidence
+          printf 'source_sha=%s\nverification_sha=%s\nrunner=%s/%s\n' \
+            "$(git rev-parse HEAD)" "$VERIFICATION_SHA" "$RUNNER_OS" "$RUNNER_ARCH" \
+            > ../verification/verification-evidence/source-receipt.txt
+      - name: Prime native Windows ARM64 build prerequisites
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        shell: pwsh
+        run: |
+          ./scripts/build/windows-deps.ps1 -StateRoot "$env:RUNNER_TEMP/hermes-build-deps" -GithubEnv $env:GITHUB_ENV -GithubPath $env:GITHUB_PATH
+      - name: Build isolated locked test environment through existing PM
+        uses: ./source/.github/actions/setup-pm
+        with:
+          extras: '[]'
+          test-environment: 'true'
+          cache: 'false'
+          cache-python: 'false'
+          cache-node: 'false'
+          archive-inputs: 'false'
+      - name: Run focused tests with no provider or real agent execution
+        env:
+          HERMES_TEST_FILE_RETRIES: '0'
+        run: |
+          set -euo pipefail
+          # Independent guard lives in the harness. Add only its import shim to source.
+          # Do not change a tracked pinned source file.
+          cat > final_head_provider_free_guard.py <<'PY'
+          import runpy
+          from pathlib import Path
+          globals().update(runpy.run_path(str(Path(__file__).resolve().parent.parent / "verification/.github/scripts/hermes-final-head-provider-free-guard.py")))
+          PY
+          set +e
+          bash scripts/run_tests.sh \
+            tests/tools/test_delegate.py \
+            tests/tools/test_delegate_final_input.py \
+            tests/scripts/test_audit_pr_attribution.py \
+            tests/scripts/test_ci_portability.py \
+            tests/hermes_cli/test_local_runtime_key_file.py \
+            -j 4 -k 'TestDispatchDelegateTask or final_input_observation or stacked_pr or unavailable_or_invalid_pr_base or ci_workflow_closure or standard_runner_shards or private_persistent_key or launch_uses_file or windows_key_file_rejects_redirects_even_during_open or windows_validated_handles_deny_replacement_until_io_finishes' \
+            "--override-ini=addopts=-m 'not integration and not live' -p final_head_provider_free_guard" \
+            2>&1 | tee ../verification/verification-evidence/focused-tests.log
+          result=${PIPESTATUS[0]}
+          set -e
+          rm final_head_provider_free_guard.py
+          git diff --exit-code
+          exit "$result"
+      - name: Require audit receipts and record test counts
+        if: always()
+        run: |
+          "$HERMES_PYTHON" - <<'PY'
+          import json, pathlib, re
+          output = pathlib.Path("../verification/verification-evidence")
+          audits = [json.loads(p.read_text(encoding="utf-8")) for p in output.glob("test_*.json")]
+          expected = {"test_delegate.py", "test_delegate_final_input.py", "test_audit_pr_attribution.py",
+                      "test_ci_portability.py", "test_local_runtime_key_file.py"}
+          if {a["test_file"] for a in audits} != expected:
+              raise SystemExit("Missing focused-test audit receipts")
+          if any(a["exitstatus"] != 0 or a["collected"] <= 0 or a["blocked_attempts"] for a in audits):
+              raise SystemExit("Failed, empty or forbidden-execution audit")
+          log = (output / "focused-tests.log").read_text(encoding="utf-8")
+          summary = re.search(r"=== Summary:.*", log)
+          if summary is None:
+              raise SystemExit("Canonical runner summary missing")
+          result = {"source_sha": "545af8db206beb2d6db1437859383d0575500a96",
+                    "summary": summary.group(), "audited_files": len(audits),
+                    "real_provider_calls": 0, "real_codex_calls": 0, "actual_delegate_spawns": 0,
+                    "full_ci_acceptance": False}
+          (output / "summary.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps(result))
+          PY
+      - name: Upload safe focused-test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: final-head-focused-${{ matrix.runner }}
+          path: verification/verification-evidence/
+          retention-days: 14
+          if-no-files-found: error
