@@ -36,6 +36,7 @@ afterEach((): void => {
   delete process.env.HERMES_PAYLOAD_TAG
   delete process.env.HERMES_BUILD_COMMIT
   delete process.env.HERMES_PAYLOAD_VERSION
+  delete process.env.HERMES_DESKTOP_USER_DATA_DIR
   vi.resetModules()
 })
 
@@ -112,6 +113,64 @@ test('nonstable runtime pins userData before the app name can change', async ():
     assert.equal(runtime.applyDesktopIdentity(app, canary), canary.displayName)
     assert.equal(paths.userData, path.join(paths.appData, canary.appNamePascal))
     assert.equal(name, canary.displayName)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('commit identity creates isolated userData before Electron pins it', async (): Promise<void> => {
+  process.env.HERMES_BUILD_COMMIT = 'dadf0dc14af98a848629284c627fb85a0d891473'
+  const identity: ProductIdentity = await identityForVariant('bundled')
+  const runtime: { applyDesktopIdentity: typeof applyDesktopIdentity } = await import('./product-identity')
+  const root: string = fs.mkdtempSync(path.join(os.tmpdir(), 'identity-isolated-userdata-'))
+  const userData: string = path.join(root, 'desktop-userdata')
+  process.env.HERMES_DESKTOP_USER_DATA_DIR = userData
+  let pinnedUserData: string | undefined
+  let name: string | undefined
+
+  const app: Parameters<typeof applyDesktopIdentity>[0] = {
+    getPath: (): string => assert.fail('an explicit userData override must not query appData'),
+    setPath: (key: string, value: string): void => {
+      assert.equal(key, 'userData')
+      assert.equal(value, userData)
+      assert.ok(fs.existsSync(value), 'Electron requires userData to exist before it is pinned')
+      assert.ok(fs.statSync(value).isDirectory())
+      pinnedUserData = value
+    },
+    setName: (value: string): void => {
+      name = value
+    }
+  }
+
+  try {
+    assert.ok(identity.appNamePascal.includes('dadf0dc'))
+    assert.equal(runtime.applyDesktopIdentity(app, identity), identity.displayName)
+    assert.equal(pinnedUserData, userData)
+    assert.equal(name, identity.displayName)
+    assert.ok(fs.statSync(userData).isDirectory())
+    assert.equal(fs.existsSync(path.join(root, identity.appNamePascal)), false)
+    assert.deepEqual(fs.readdirSync(root), ['desktop-userdata'])
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stable identity keeps the existing no-early-write path', async (): Promise<void> => {
+  const identity: ProductIdentity = await identityForVariant('bundled')
+  const runtime: { applyDesktopIdentity: typeof applyDesktopIdentity } = await import('./product-identity')
+  const root: string = fs.mkdtempSync(path.join(os.tmpdir(), 'identity-stable-userdata-'))
+  process.env.HERMES_DESKTOP_USER_DATA_DIR = path.join(root, 'desktop-userdata')
+
+  const app: Parameters<typeof applyDesktopIdentity>[0] = {
+    getPath: (): string => assert.fail('stable identity must not query appData'),
+    setPath: (): void => assert.fail('stable identity must not pin userData early'),
+    setName: (): void => assert.fail('stable identity must not change the app name')
+  }
+
+  try {
+    assert.equal(identity.appNamePascal, identity.artifactNamePascal)
+    assert.equal(runtime.applyDesktopIdentity(app, identity), null)
+    assert.deepEqual(fs.readdirSync(root), [])
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

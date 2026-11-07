@@ -23,9 +23,12 @@ export const PRODUCT_IDENTITY: Readonly<ProductIdentity> =
     ? Object.freeze(nodeCreateRequire(import.meta.url)('../product-identity.cjs') as ProductIdentity)
     : Object.freeze(__HERMES_PRODUCT_IDENTITY__)
 
-/** Pin before the first userData lookup and single-instance lock. Electron's
- * later display-name changes must not redirect an installed build's state.
- * Stable keeps its historical userData and runtime naming behavior.
+/** Pin before the first userData lookup and single-instance lock. When an
+ * isolated userData override is supplied, create it before pinning it (Electron
+ * requires the directory to exist) without querying ambient appData.
+ * Electron's later display-name changes must not redirect an installed
+ * build's state. Stable keeps its historical userData and runtime naming
+ * behavior.
  */
 export function applyDesktopIdentity(
   app: {
@@ -37,6 +40,17 @@ export function applyDesktopIdentity(
 ): string | null {
   if (!identity.token && identity.appNamePascal === identity.artifactNamePascal) {
     return null
+  }
+
+  const userDataOverride: string | undefined = process.env.HERMES_DESKTOP_USER_DATA_DIR
+
+  if (userDataOverride) {
+    const userData: string = path.resolve(userDataOverride)
+    mkdirSync(userData, { recursive: true })
+    app.setPath('userData', userData)
+    app.setName(identity.displayName)
+
+    return identity.displayName
   }
 
   const userData: string = path.join(app.getPath('appData'), identity.appNamePascal)
