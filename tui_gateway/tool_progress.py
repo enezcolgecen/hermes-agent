@@ -260,6 +260,17 @@ def _connector_lifecycle_is_stale(sid: str, name: str, args: dict) -> bool:
 def _emit_tool_lifecycle(event, sid, name, args, payload):
     if not _connector_tool_lifecycle(name, args):
         return _emit(event, sid, payload)
+    if (_sessions.get(sid) or {}).get("_cutmentis_guard_required"):
+        import sys
+        bridge = sys.modules.get("cutmentis_desktop_native_bridge")
+        if bridge is None:
+            return False
+        try:
+            allowed, payload = bridge.filter_desktop_event(sid, event, payload)
+        except Exception:
+            return False
+        if not allowed:
+            return False
     from tui_gateway.connector_payload import connector_ui_payload
     from tui_gateway.event_replay import _stamp_event
 

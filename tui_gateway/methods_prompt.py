@@ -671,6 +671,205 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None):
     return error
 
 
+def _cutmentis_preflight(session, text, voice_context=None):
+    import sys
+    with session["history_lock"]:
+        history = tuple(session.get("history") or ())
+    cwd = _session_cwd(session)
+    known = bool(session.get("_cutmentis_guard_scope"))
+    known = known or any("cutmentis" in value.casefold() for value in (text, voice_context, cwd) if isinstance(value, str))
+    known = known or any(isinstance(row, dict) and row.get("role") == "user"
+                         and "cutmentis" in str(row.get("content") or "").casefold()
+                         for row in history[-8:])
+    try:
+        from hermes_cli.lifecycle import has_hook
+        has_hook("pre_llm_call")  # trigger supported plugin discovery before model admission
+        bridge = sys.modules.get("cutmentis_desktop_native_bridge")
+        if bridge is None:
+            # Without the scope handler there is no trustworthy way to decide
+            # that this particular turn is unrelated to protected work.
+            return True, None, history, cwd, False
+        scoped = bridge.desktop_scope(text, conversation_history=history, cwd=cwd,
+                                      voice_context=voice_context,
+                                      session_key=session.get("session_key")) or known
+    except Exception:
+        # Unknown scope is denied if the admission mechanism itself failed.
+        return True, None, history, cwd, False
+    if scoped:
+        session["_cutmentis_guard_scope"] = True
+        return True, bridge, history, cwd, False
+    try:
+        neutral = bridge.desktop_ambiguous_no_model(text, voice_context=voice_context)
+    except Exception:
+        # The host bridge exists, but ambiguous project identity could not be
+        # checked. Keep the guarded response neutral and fail closed.
+        return True, bridge, history, cwd, True
+    return bool(neutral), bridge, history, cwd, bool(neutral)
+
+
+def _cutmentis_direct_answer(context, text, voice_context=None, has_images=False, session_key=None):
+    _, bridge, history, cwd, neutral = context
+    if neutral:
+        return ("Proje bağlamı doğrulanamadı; bu nedenle istenen doğrulama modelsiz güvenle "
+                "tamamlanamadı. Model/provider veya Serial yürütme başlatılmadı. "
+                "Doğrulama için proje kimliğini veya bağlamını belirtin.")
+    fallback = ("CutMentis isteği güvenli doğrudan yolda karşılanamadı; "
+                "model/provider veya seri yürütme başlatılmadı.")
+    if bridge is None or has_images or not isinstance(text, str) or not text.strip():
+        return fallback
+    try:
+        answer = bridge.desktop_turn(text, conversation_history=history, cwd=cwd,
+                                     voice_context=voice_context, session_key=session_key)
+        return answer if isinstance(answer, str) and answer.strip() else fallback
+    except Exception:
+        return fallback
+
+
+def _cutmentis_guarded_direct(sid, session, context, text, voice_context=None, has_images=False,
+                              timeout_seconds=30.0):
+    # The direct resolver is the only source of the final text. No event
+    # payload, model stream, or tool result can become this answer.
+    import contextvars
+    import secrets
+    bridge = context[1]
+    if bridge is None:
+        raise RuntimeError("CUTMENTIS_OUTPUT_BRIDGE_UNAVAILABLE")
+    turn = secrets.token_hex(16)
+    with session["history_lock"]:
+        if not session.get("running") or session.get("_cutmentis_guard_required"):
+            raise RuntimeError("CUTMENTIS_OUTPUT_TURN_UNAVAILABLE")
+        session["_cutmentis_guard_required"] = True
+        session["_cutmentis_guard_turn"] = turn
+    armed = False
+    deferred = False
+    def cleanup():
+        try:
+            released = not armed or bridge.disarm_direct_output(sid, turn) is True
+        except Exception:
+            released = False
+        with session["history_lock"]:
+            if session.get("_cutmentis_guard_turn") == turn:
+                if released:
+                    session.pop("_cutmentis_guard_required", None)
+                    session.pop("_cutmentis_guard_turn", None)
+                session["running"] = False
+                session["last_active"] = time.time()
+                session.pop("_hosted_room_task", None)
+                _clear_inflight_turn(session)
+                _release_active_session_slot(session)
+        return released
+    try:
+        if bridge.arm_direct_output(sid, turn) is not True:
+            raise RuntimeError("CUTMENTIS_OUTPUT_ARM_FAILED")
+        armed = True
+        done = threading.Event()
+        response = []
+        caller_context = contextvars.copy_context()
+        def resolve():
+            try:
+                response.append(_cutmentis_direct_answer(context, text, voice_context, has_images,
+                                                          session.get("session_key")))
+            finally:
+                done.set()
+        worker = threading.Thread(target=lambda: caller_context.run(resolve), daemon=True)
+        worker.start()
+        if not done.wait(timeout_seconds):
+            # Keep the quarantine in place until the outstanding resolver has
+            # actually exited; its late events must never reach a later turn.
+            deferred = True
+            def finish_late():
+                worker.join()
+                if cleanup():
+                    _cutmentis_schedule_queued(sid, session, 'cutmentis-timeout-drain')
+            threading.Thread(target=finish_late, daemon=True).start()
+            raise RuntimeError("CUTMENTIS_DIRECT_TIMEOUT")
+        if len(response) != 1:
+            raise RuntimeError("CUTMENTIS_DIRECT_RESOLVER_FAILED")
+        answer = response[0]
+        with session["history_lock"]:
+            if (session.get("_turn_cancel_requested") or not session.get("running")
+                    or session.get("_cutmentis_guard_turn") != turn):
+                raise RuntimeError("CUTMENTIS_OUTPUT_TURN_CANCELLED")
+        if bridge.seal_direct_output(sid, turn, answer) is not True:
+            raise RuntimeError("CUTMENTIS_OUTPUT_SEAL_FAILED")
+        bridge.emit_direct_output(sid, turn, lambda: _commit_pre_agent_direct_response(sid, session, text, answer))
+    finally:
+        if not deferred and not cleanup():
+            raise RuntimeError("CUTMENTIS_OUTPUT_DISARM_FAILED")
+
+
+def _cutmentis_schedule_queued(sid, session, rid):
+    with session["history_lock"]:
+        pending = bool(session.get("queued_prompt")) and not session.get("_turn_cancel_requested")
+    if pending:
+        def drain_next():
+            with _session_profile_runtime_scope(session):
+                _drain_queued_prompt(rid, sid, session)
+        threading.Thread(target=drain_next, daemon=True).start()
+
+
+def _commit_pre_agent_direct_response(sid, session, text, answer):
+    """Persist and emit a direct response after the native submit-time user row already exists."""
+    from agent.context_compressor import _DB_PERSISTED_MARKER
+    from agent.message_metadata import stamp_message_timestamp
+
+    with session["history_lock"]:
+        staged = session.get("_submit_user_row")
+        if (
+            not isinstance(staged, dict)
+            or staged.get("content") != text
+            or type(staged.get("_row_id")) is not int
+            or staged["_row_id"] <= 0
+        ):
+            raise RuntimeError("direct turn response user-row staging unavailable")
+
+        key = _submit_row_owner_key(staged, session)
+        if not key or key != _submit_row_target_key(session):
+            raise RuntimeError("direct turn response session ownership changed")
+
+        assistant = stamp_message_timestamp({"role": "assistant", "content": answer})
+        with _session_db(session) as db:
+            if db is None:
+                raise RuntimeError("direct turn response persistence unavailable")
+            assistant["_row_id"] = db.append_message(
+                key, "assistant", content=answer, timestamp=assistant["timestamp"],
+            )
+
+        assistant[_DB_PERSISTED_MARKER] = True
+        staged = session.pop("_submit_user_row")
+        history = list(session.get("history") or [])
+        if not history or history[-1].get("_row_id") != staged.get("_row_id"):
+            history.append(staged)
+        history.append(assistant)
+        session["history"] = history
+        session["history_version"] = int(session.get("history_version", 0)) + 1
+        if not session.get("_cutmentis_guard_required"):
+            session["running"] = False
+            session["last_active"] = time.time()
+            session.pop("_hosted_room_task", None)
+            _clear_inflight_turn(session)
+            _release_active_session_slot(session)
+
+    user_row_id = staged["_row_id"]
+    assistant_row_id = assistant["_row_id"]
+
+    _emit("message.start", sid)
+    _emit(
+        "message.complete",
+        sid,
+        {
+            "text": answer,
+            "status": "complete",
+            "persisted_turn": {
+                "row_ids": [user_row_id, assistant_row_id],
+                "complete": True,
+                "user_row_id": user_row_id,
+                "final_assistant_row_id": assistant_row_id,
+            },
+        },
+    )
+    _emit("session.info", sid, _session_info(session.get("agent"), session))
+
 def _run_after_agent_ready(
     rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author=None,
     hosted_images=None,
@@ -841,6 +1040,13 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
+    _cm_context = _cutmentis_preflight(session, text, params.get("voice_context"))
+    _cm_protected = _cm_context[0]
+    with session["history_lock"]:
+        if session.get("_cutmentis_guard_required") and not session.get("running"):
+            return _err(rid, 5075, "Protected turn cleanup pending; model dispatch blocked.")
+    if _cm_protected and (display_kind or params.get("_hosted_task") or params.get("_hosted_terminal_callback") or params.get("_hosted_images") or params.get("_turn_author")):
+        return _err(rid, 5075, "Protected CutMentis turn cannot use this route; model dispatch blocked.")
     from tools.bot_relay import DeliveryAuthor
 
     # Only the relay handler can build a DeliveryAuthor. A dict here is a client claiming a sender.
@@ -907,7 +1113,7 @@ def _(rid, params: dict) -> dict:
             # for `running` to clear and resubmits with the truncation intact.
             return _err(rid, 4009, "session busy")
         busy_response = _handle_busy_submit(
-            rid, sid, session, text, busy_transport, queued=bool(params.get("queued")), turn_author=turn_author,
+            rid, sid, session, text, busy_transport, queued=bool(params.get("queued")) or _cm_protected, turn_author=turn_author,
             display_kind=display_kind)
         if busy_response is not None:
             return busy_response
@@ -919,6 +1125,13 @@ def _(rid, params: dict) -> dict:
         rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task, display_kind)
     if err is not None:
         return err
+    if turn_isolation and _cm_protected:
+        with session["history_lock"]:
+            session["running"] = False
+            session["last_active"] = time.time()
+            _clear_inflight_turn(session)
+            _release_active_session_slot(session)
+        return _err(rid, 5075, "Protected isolated turn is unavailable; model dispatch blocked.")
     if turn_isolation:
         if turn_author:
             logger.debug("isolated compute turns carry no author yet; the turn from %s runs unattributed",
@@ -959,6 +1172,26 @@ def _(rid, params: dict) -> dict:
     staged_user = session.get("_submit_user_row") or {}
     if isinstance(staged_user.get("_row_id"), int):
         survivor_fields["user_row_id"] = staged_user["_row_id"]
+    if _cm_protected:
+        _cm_staged_row = session.get("_submit_user_row")
+        try:
+            _cutmentis_guarded_direct(sid, session, _cm_context, text, params.get("voice_context"),
+                                      bool(session.get("attached_images")))
+        except Exception:
+            with session["history_lock"]:
+                if (not session.get("_cutmentis_guard_required")
+                        and session.get("_submit_user_row") is _cm_staged_row):
+                    session["running"] = False
+                    session["last_active"] = time.time()
+                    session.pop("_hosted_room_task", None)
+                    _clear_inflight_turn(session)
+                    _release_active_session_slot(session)
+            if not session.get("_cutmentis_guard_required"):
+                _cutmentis_schedule_queued(sid, session, rid)
+            return _err(rid, 5074, "Protected direct response failed; model fallback blocked.")
+        _cutmentis_schedule_queued(sid, session, rid)
+        return _ok(rid, {"status": "streaming", **survivor_fields})
+
     # A completed FAILED build must not wedge the session: rebuild, don't replay it.
     if not _restart_completed_failed_agent_build(sid, session, session.get("agent_ready")):
         _start_agent_build(sid, session)

@@ -569,6 +569,26 @@ def write_json(obj: dict) -> bool:
     session's transport (async events reach the owner even from threads with no contextvar binding);
     (2) the context-bound transport (:func:`dispatch`); (3) module stdio (tests monkey-patch ``_real_stdout``).
     Every event frame gets a per-session monotonic ``seq`` + replay-ring entry so ``session.events.since`` can resume."""
+    # Guard before event replay, transport routing, or hosted activity projection.
+    if isinstance(obj, dict):
+        params = obj.get("params")
+        sid = params.get("session_id") if isinstance(params, dict) else None
+        if sid and (_sessions.get(sid) or {}).get("_cutmentis_guard_required"):
+            if obj.get("method") != "event":
+                return False
+            import sys
+            bridge = sys.modules.get("cutmentis_desktop_native_bridge")
+            if bridge is None:
+                return False
+            try:
+                if bridge.claim_desktop_event_write(sid, params.get("type"), params.get("payload")) is not True:
+                    return False
+            except Exception:
+                return False
+    if sid and (_sessions.get(sid) or {}).get("_cutmentis_guard_required"):
+        stamped = stream_segments.stamp_session_frame(_sessions.get(sid), params.get("type"), params.get("payload"))
+        if stamped is not None:
+            params["payload"] = stamped
     from tui_gateway.event_replay import _stamp_event
     from tui_gateway.hosted_room_member_activity import project_room_member_activity
     _stamp_event(obj)
@@ -591,9 +611,41 @@ def _event_frame(event: str, sid: str, payload: dict | None = None) -> dict:
 
 
 def _emit(event: str, sid: str, payload: dict | None = None) -> bool:
+    cm_session = _sessions.get(sid) or {}
+    if cm_session.get("_cutmentis_guard_required"):
+        import sys
+        bridge = sys.modules.get("cutmentis_desktop_native_bridge")
+        if bridge is None:
+            return False
+        if event == "message.complete" and cm_session.get("_cutmentis_guard_turn"):
+            # Linearize the final write against session.interrupt, which sets
+            # cancellation under this same lock. No raw payload is emitted.
+            with cm_session["history_lock"]:
+                if cm_session.get("_turn_cancel_requested") or not cm_session.get("running"):
+                    return False
+                try:
+                    allowed, payload = bridge.filter_desktop_event(sid, event, payload)
+                except Exception:
+                    return False
+                if not allowed:
+                    return False
+                from agent.notification_presentation import event_presentation_muted
+                if event_presentation_muted(event, sid):
+                    return False
+                if not write_json(_event_frame(event, sid, payload)):
+                    raise RuntimeError("CUTMENTIS_OUTPUT_DELIVERY_FAILED")
+                return True
+        try:
+            allowed, payload = bridge.filter_desktop_event(sid, event, payload)
+        except Exception:
+            return False
+        if not allowed:
+            return False
     from agent.notification_presentation import event_presentation_muted
     if event_presentation_muted(event, sid):
         return False
+    if (_sessions.get(sid) or {}).get("_cutmentis_guard_required"):
+        return write_json(_event_frame(event, sid, payload))
     return write_json(_event_frame(event, sid, stream_segments.stamp_session_frame(_sessions.get(sid), event, payload)))
 
 

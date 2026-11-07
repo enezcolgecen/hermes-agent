@@ -501,6 +501,41 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
             session["_submit_user_row"] = dispatch_row
         else:
             session.pop("_submit_user_row", None)
+    # Protected queued turns cannot bypass admission via the direct prompt runner.
+    _cm_context = _cutmentis_preflight(session, queued.get("text"), session.get("voice_live_context"))
+    if _cm_context[0]:
+        _cm_staged_row = session.get("_submit_user_row")
+        def _cm_release_failed_queue():
+            with session["history_lock"]:
+                if (not session.get("_cutmentis_guard_required")
+                        and session.get("_submit_user_row") is _cm_staged_row):
+                    session["running"] = False
+                    session["last_active"] = time.time()
+                    _clear_inflight_turn(session)
+                    _release_active_session_slot(session)
+
+        def _cm_schedule_next_queue():
+            with session["history_lock"]:
+                pending = bool(session.get("queued_prompt")) and not session.get("_turn_cancel_requested")
+            if pending:
+                def drain_next():
+                    with _session_profile_runtime_scope(session):
+                        _drain_queued_prompt(rid, sid, session)
+                threading.Thread(target=drain_next, daemon=True).start()
+
+        if use_compute_host or queued.get("turn_author"):
+            _cm_release_failed_queue()
+            _emit("error", sid, {"message": "Protected isolated or authored queued turn blocked before model dispatch."})
+            _cm_schedule_next_queue()
+            return True
+        try:
+            _cutmentis_guarded_direct(sid, session, _cm_context, queued.get("text"),
+                                      session.get("voice_live_context"), bool(queued.get("image_paths")))
+        except Exception:
+            _cm_release_failed_queue()
+            _emit("error", sid, {"message": "Protected queued response failed; model fallback blocked."})
+        _cm_schedule_next_queue()
+        return True
     # The compute-host frame has no author field, so only the inline runner receives it.
     author_kwargs = {"turn_author": queued["turn_author"]} if queued.get("turn_author") else {}
     dispatch_failed = False

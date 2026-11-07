@@ -285,6 +285,17 @@ def resolve_response(frame: dict, transport: Any = None) -> bool:
     rid = frame.get("id")
     if not isinstance(rid, str):
         return False
+    # Reserved for the CutMentis one-turn, transport-bound confirmation.
+    # Missing/broken bridge or foreign/stale response must never fall through.
+    if rid.startswith("srq-cm-"):
+        import sys
+        bridge = sys.modules.get("cutmentis_desktop_native_bridge")
+        if bridge is not None:
+            try:
+                bridge.route_native_response(frame, transport=transport)
+            except Exception:
+                pass
+        return True
     if _is_not_shown(frame):
         return _decline(rid, transport)
     with _lock:
