@@ -24,8 +24,8 @@ export const PRODUCT_IDENTITY: Readonly<ProductIdentity> =
     : Object.freeze(__HERMES_PRODUCT_IDENTITY__)
 
 /** Pin before the first userData lookup and single-instance lock. When an
- * isolated userData override is supplied, honor it before creating any path so
- * Electron's ambient appData directory is never the first write target.
+ * isolated userData override is supplied, create it before pinning it (Electron
+ * requires the directory to exist) without querying ambient appData.
  * Electron's later display-name changes must not redirect an installed
  * build's state. Stable keeps its historical userData and runtime naming
  * behavior.
@@ -46,8 +46,8 @@ export function applyDesktopIdentity(
 
   if (userDataOverride) {
     const userData: string = path.resolve(userDataOverride)
-    app.setPath('userData', userData)
     mkdirSync(userData, { recursive: true })
+    app.setPath('userData', userData)
     app.setName(identity.displayName)
 
     return identity.displayName

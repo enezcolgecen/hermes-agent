@@ -118,7 +118,7 @@ test('nonstable runtime pins userData before the app name can change', async ():
   }
 })
 
-test('commit identity pins isolated userData before its first directory write', async (): Promise<void> => {
+test('commit identity creates isolated userData before Electron pins it', async (): Promise<void> => {
   process.env.HERMES_BUILD_COMMIT = 'dadf0dc14af98a848629284c627fb85a0d891473'
   const identity: ProductIdentity = await identityForVariant('bundled')
   const runtime: { applyDesktopIdentity: typeof applyDesktopIdentity } = await import('./product-identity')
@@ -133,7 +133,8 @@ test('commit identity pins isolated userData before its first directory write', 
     setPath: (key: string, value: string): void => {
       assert.equal(key, 'userData')
       assert.equal(value, userData)
-      assert.equal(fs.existsSync(value), false, 'userData must be pinned before directory creation')
+      assert.ok(fs.existsSync(value), 'Electron requires userData to exist before it is pinned')
+      assert.ok(fs.statSync(value).isDirectory())
       pinnedUserData = value
     },
     setName: (value: string): void => {
@@ -147,6 +148,7 @@ test('commit identity pins isolated userData before its first directory write', 
     assert.equal(pinnedUserData, userData)
     assert.equal(name, identity.displayName)
     assert.ok(fs.statSync(userData).isDirectory())
+    assert.equal(fs.existsSync(path.join(root, identity.appNamePascal)), false)
     assert.deepEqual(fs.readdirSync(root), ['desktop-userdata'])
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
